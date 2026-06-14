@@ -3,10 +3,13 @@
 Full-colour indoor air-quality display for the **ESP32-2432S028R**
 ("Cheap Yellow Display") and a **Sensirion SCD40 or SCD41** sensor.
 
+<img width="1600" height="1028" alt="Photo" src="https://github.com/user-attachments/assets/c737540a-e915-470b-839a-d51b911a8628" />
+
 ## Display
 
 - Large, colour-coded CO2 reading
 - Touch-selectable CO2 graph: 10 minutes, 1 hour, 6 hours, or 12 hours
+- Swipe-selectable SD history graph: 24 hours, 7 days, or 30 days
 - Smaller temperature and humidity cards
 - Green: below 800 ppm
 - Amber: 800-1199 ppm
@@ -24,6 +27,15 @@ Tap anywhere inside the **CO2 TREND** panel to cycle through:
 
 The selected range is remembered after a restart.
 
+Swipe left anywhere on the dashboard to open the long-term SD history screen.
+Tap that screen to cycle through:
+
+`24 hours` -> `7 days` -> `30 days`
+
+Swipe right to return to the dashboard. The long-term graph reads only the
+required tail of `co2log.csv` and condenses it to the screen width, so its RAM
+usage does not grow with the size of the log file.
+
 ## Persistent history
 
 - CO2 is sampled every 10 seconds.
@@ -31,10 +43,71 @@ The selected range is remembered after a restart.
 - Longer views use one-minute averages.
 - Up to 12 hours of one-minute history is stored in ESP32 NVS.
 - History is saved every 10 minutes to reduce flash wear.
+- One-minute CO2, temperature, and humidity averages are appended to
+  `co2log.csv` on the onboard microSD card for long-term storage.
 
 After an unexpected power loss, up to the most recent 10 minutes of unsaved
 history may be lost. Previously saved history and the selected graph range are
 restored on startup.
+
+### SD card log
+
+Insert a FAT32-formatted microSD card before startup. The firmware creates
+`co2log.csv` with these columns:
+
+```text
+boot_id,uptime_seconds,co2_ppm,temperature_c,humidity_percent,local_timestamp
+```
+
+The log is an append-only database that can be opened directly in spreadsheet,
+charting, or database-import tools. Each row is closed and committed after it
+is written, limiting loss during a power failure to the current one-minute
+average. If the card is missing or a write fails, the firmware retries once a
+minute without interrupting the dashboard.
+
+`local_timestamp` is supplied by network time when Wi-Fi is connected. Until
+the first NTP synchronization completes it contains `unsynced`.
+`uptime_seconds` and `boot_id` remain available to identify and order readings
+when network time is unavailable.
+
+The SD slot uses GPIO 5 (CS), 18 (SCK), 19 (MISO), and 23 (MOSI). Software SPI
+is used because the LCD and touch controller already occupy both ESP32
+hardware SPI controllers.
+
+## Wi-Fi and timezone setup
+
+On first boot, or whenever the saved network cannot be reached, the dashboard
+creates an open Wi-Fi access point named:
+
+```text
+CO2-Dashboard-Setup
+```
+
+Connect a phone or computer to that network. The captive portal should open
+automatically; otherwise browse to `http://192.168.4.1`. Select the local Wi-Fi
+network, enter its password, and set the timezone before saving.
+The setup portal closes after five minutes if it is not used, allowing the
+dashboard and SD logging to continue offline.
+
+The timezone field accepts a POSIX timezone rule. The default is for the UK:
+
+```text
+GMT0BST,M3.5.0/1,M10.5.0
+```
+
+Other examples:
+
+| Location | POSIX timezone rule |
+|----------|---------------------|
+| UTC | `UTC0` |
+| US Eastern | `EST5EDT,M3.2.0,M11.1.0` |
+| US Central | `CST6CDT,M3.2.0,M11.1.0` |
+| US Mountain | `MST7MDT,M3.2.0,M11.1.0` |
+| US Pacific | `PST8PDT,M3.2.0,M11.1.0` |
+| Central Europe | `CET-1CEST,M3.5.0,M10.5.0/3` |
+
+Wi-Fi credentials are stored by the ESP32 Wi-Fi stack and the timezone is
+stored in NVS. The board reconnects automatically after subsequent restarts.
 
 ## Sensor wiring
 
@@ -48,6 +121,31 @@ restored on startup.
 Use a breakout board that includes the required I2C pull-up resistors. The
 pins can be changed at the top of `src/main.cpp` if your board exposes a
 different connector.
+
+### Sensor power
+
+On the tested board, powering the CYD through its **Micro-USB port** provides
+stable operation with the SCD40/SCD41 connected to the onboard 3.3 V pin.
+Powering the same board through its **USB-C port** caused the LCD backlight to
+flicker during sensor measurements. This is likely due to additional voltage
+drop in that input path, the USB cable, or the connector.
+
+Prefer Micro-USB for normal operation and do not power both USB ports at the
+same time.
+
+The sensor can draw approximately 205 mA in short measurement pulses. If the
+backlight still flickers:
+
+- Try a shorter, higher-quality Micro-USB cable and a reliable 5 V supply.
+- Add a 470 uF electrolytic capacitor and a 100 nF ceramic capacitor directly
+  across the sensor's VIN and GND.
+- As a fallback, power the sensor from a separate regulated 3.3 V supply rated
+  for at least 300 mA, with its ground connected to CYD ground.
+
+Some SCD4x breakout boards accept 5 V and include both a regulator and I2C
+level shifting. Only power a breakout from the CYD 5 V pin when its
+manufacturer explicitly states that both features are present. Do not allow
+SDA or SCL to be pulled up to 5 V.
 
 ## Build and upload
 
