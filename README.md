@@ -255,5 +255,4 @@ pio run -t upload
 pio device monitor
 ```
 
-The dashboard requests a new reading every 10 seconds. The first displayed
-reading normally appears about 10 seconds after startup.
+The dashboard requests a new reading every 10 seconds. The first displayed reading normally appears about 30 seconds after startup for CO2 and 3 minutes for temperature and humidity, this is allow the sensors to settle down and not log false readings.
