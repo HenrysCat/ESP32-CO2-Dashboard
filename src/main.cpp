@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <memory>
 #include <time.h>
 
 namespace config {
@@ -20,6 +21,7 @@ constexpr int kBootButtonPin = 0;
 constexpr int kI2cSdaPin = 27;
 constexpr int kI2cSclPin = 22;
 constexpr uint8_t kScd4xAddress = 0x62;
+constexpr uint8_t kScd30Address = 0x61;
 constexpr uint32_t kReadingIntervalMs = 10000;
 constexpr uint32_t kCo2StabilizationMs = 30000;
 constexpr uint32_t kEnvironmentalStabilizationMs = 180000;
@@ -132,9 +134,46 @@ class CydDisplay : public lgfx::LGFX_Device {
   bool colorOrderRgb() const { return panel_.config().rgb_order; }
 };
 
-class Scd4x {
+uint8_t sensirionCrc8(const uint8_t* data, size_t length) {
+  uint8_t crc = 0xFF;
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x31)
+                         : static_cast<uint8_t>(crc << 1);
+    }
+  }
+  return crc;
+}
+
+// Common interface so the rest of the app can drive either an SCD4x or an
+// SCD30 without knowing which one is actually wired up.
+class Co2Sensor {
  public:
-  bool begin() {
+  virtual ~Co2Sensor() = default;
+  virtual const char* name() const = 0;
+  virtual bool begin() = 0;
+  virtual bool factoryReset() = 0;
+  virtual bool readIfReady(uint16_t& co2, float& temperature,
+                           float& humidity) = 0;
+  virtual bool readSettings(bool& asc_enabled, float& temperature_offset,
+                            uint16_t& altitude) = 0;
+  virtual bool setAutomaticSelfCalibration(bool enabled) = 0;
+  virtual bool setTemperatureOffset(float offset) = 0;
+  virtual bool saveSettings(bool asc_enabled, float temperature_offset,
+                            uint16_t altitude) = 0;
+  virtual bool performForcedRecalibration(uint16_t target,
+                                          int16_t& correction) = 0;
+  // SCD30's forced-recalibration command only accepts a reference value; it
+  // does not report back a correction delta the way the SCD4x does.
+  virtual bool reportsForcedRecalibrationCorrection() const { return true; }
+};
+
+class Scd4x : public Co2Sensor {
+ public:
+  const char* name() const override { return "SCD4x"; }
+
+  bool begin() override {
     Wire.begin(config::kI2cSdaPin, config::kI2cSclPin);
     Wire.setClock(100000);
 
@@ -146,7 +185,7 @@ class Scd4x {
     return sendCommand(0x21B1);
   }
 
-  bool factoryReset() {
+  bool factoryReset() override {
     if (!stopMeasurement() || !sendCommand(0x3632)) return false;
     delay(1200);
     if (!sendCommand(0x3646)) return false;
@@ -154,7 +193,7 @@ class Scd4x {
     return sendCommand(0x21B1);
   }
 
-  bool readIfReady(uint16_t& co2, float& temperature, float& humidity) {
+  bool readIfReady(uint16_t& co2, float& temperature, float& humidity) override {
     uint16_t ready = 0;
     if (!readWords(0xE4B8, &ready, 1, 1) || (ready & 0x07FF) == 0) {
       return false;
@@ -172,7 +211,7 @@ class Scd4x {
   }
 
   bool readSettings(bool& asc_enabled, float& temperature_offset,
-                    uint16_t& altitude) {
+                    uint16_t& altitude) override {
     if (!stopMeasurement()) return false;
     uint16_t asc = 0;
     uint16_t raw_offset = 0;
@@ -187,11 +226,11 @@ class Scd4x {
     return true;
   }
 
-  bool setAutomaticSelfCalibration(bool enabled) {
+  bool setAutomaticSelfCalibration(bool enabled) override {
     return updateSetting(0x2416, enabled ? 1 : 0);
   }
 
-  bool setTemperatureOffset(float offset) {
+  bool setTemperatureOffset(float offset) override {
     const uint16_t raw = static_cast<uint16_t>(
         std::round(offset * 65535.0f / 175.0f));
     return updateSetting(0x241D, raw);
@@ -202,7 +241,7 @@ class Scd4x {
   }
 
   bool saveSettings(bool asc_enabled, float temperature_offset,
-                    uint16_t altitude) {
+                    uint16_t altitude) override {
     const uint16_t raw_offset = static_cast<uint16_t>(
         std::round(temperature_offset * 65535.0f / 175.0f));
     if (!stopMeasurement()) return false;
@@ -219,7 +258,7 @@ class Scd4x {
     return written && persisted && restarted;
   }
 
-  bool performForcedRecalibration(uint16_t target, int16_t& correction) {
+  bool performForcedRecalibration(uint16_t target, int16_t& correction) override {
     if (!stopMeasurement() || !sendCommandWithWord(0x362F, target)) {
       sendCommand(0x21B1);
       return false;
@@ -234,18 +273,6 @@ class Scd4x {
   }
 
  private:
-  static uint8_t crc8(const uint8_t* data, size_t length) {
-    uint8_t crc = 0xFF;
-    for (size_t i = 0; i < length; ++i) {
-      crc ^= data[i];
-      for (uint8_t bit = 0; bit < 8; ++bit) {
-        crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x31)
-                           : static_cast<uint8_t>(crc << 1);
-      }
-    }
-    return crc;
-  }
-
   static bool sendCommand(uint16_t command) {
     Wire.beginTransmission(config::kScd4xAddress);
     Wire.write(static_cast<uint8_t>(command >> 8));
@@ -260,7 +287,7 @@ class Scd4x {
     Wire.write(static_cast<uint8_t>(command >> 8));
     Wire.write(static_cast<uint8_t>(command));
     Wire.write(bytes, sizeof(bytes));
-    Wire.write(crc8(bytes, sizeof(bytes)));
+    Wire.write(sensirionCrc8(bytes, sizeof(bytes)));
     return Wire.endTransmission() == 0;
   }
 
@@ -274,7 +301,7 @@ class Scd4x {
       uint8_t bytes[2] = {static_cast<uint8_t>(Wire.read()),
                           static_cast<uint8_t>(Wire.read())};
       const uint8_t received_crc = static_cast<uint8_t>(Wire.read());
-      if (crc8(bytes, 2) != received_crc) return false;
+      if (sensirionCrc8(bytes, 2) != received_crc) return false;
       words[i] = static_cast<uint16_t>(bytes[0] << 8) | bytes[1];
     }
     return true;
@@ -313,7 +340,151 @@ class Scd4x {
       uint8_t bytes[2] = {static_cast<uint8_t>(Wire.read()),
                           static_cast<uint8_t>(Wire.read())};
       const uint8_t received_crc = static_cast<uint8_t>(Wire.read());
-      if (crc8(bytes, 2) != received_crc) {
+      if (sensirionCrc8(bytes, 2) != received_crc) {
+        return false;
+      }
+      words[i] = static_cast<uint16_t>(bytes[0] << 8) | bytes[1];
+    }
+    return true;
+  }
+};
+
+class Scd30 : public Co2Sensor {
+ public:
+  const char* name() const override { return "SCD30"; }
+
+  bool begin() override {
+    Wire.begin(config::kI2cSdaPin, config::kI2cSclPin);
+    Wire.setClock(100000);
+
+    // Stop a measurement that may have survived a soft reset, then start a
+    // fresh one with ambient pressure compensation disabled.
+    sendCommand(0x0104);
+    delay(10);
+    return sendCommandWithWord(0x0010, 0);
+  }
+
+  bool factoryReset() override {
+    sendCommand(0x0104);
+    delay(10);
+    sendCommand(0xD304);
+    delay(30);
+    bool ok = sendCommandWithWord(0x5306, 0);
+    delay(5);
+    ok = ok && sendCommandWithWord(0x5403, 0);
+    delay(5);
+    ok = ok && sendCommandWithWord(0x5102, 0);
+    delay(5);
+    return ok && sendCommandWithWord(0x0010, 0);
+  }
+
+  bool readIfReady(uint16_t& co2, float& temperature, float& humidity) override {
+    uint16_t ready = 0;
+    if (!readWords(0x0202, &ready, 1, 3) || ready == 0) {
+      return false;
+    }
+
+    uint16_t words[6] = {};
+    if (!readWords(0x0300, words, 6, 3)) {
+      return false;
+    }
+
+    const float co2_value = wordsToFloat(words[0], words[1]);
+    if (!isfinite(co2_value) || co2_value <= 0.0f) return false;
+    co2 = static_cast<uint16_t>(std::lround(co2_value));
+    temperature = wordsToFloat(words[2], words[3]);
+    humidity = wordsToFloat(words[4], words[5]);
+    return true;
+  }
+
+  bool readSettings(bool& asc_enabled, float& temperature_offset,
+                    uint16_t& altitude) override {
+    uint16_t asc = 0;
+    uint16_t raw_offset = 0;
+    if (!readWords(0x5306, &asc, 1, 3) || !readWords(0x5403, &raw_offset, 1, 3) ||
+        !readWords(0x5102, &altitude, 1, 3)) {
+      return false;
+    }
+    asc_enabled = asc != 0;
+    temperature_offset = static_cast<float>(raw_offset) / 100.0f;
+    return true;
+  }
+
+  bool setAutomaticSelfCalibration(bool enabled) override {
+    return sendCommandWithWord(0x5306, enabled ? 1 : 0);
+  }
+
+  bool setTemperatureOffset(float offset) override {
+    const uint16_t raw =
+        static_cast<uint16_t>(std::round(std::max(0.0f, offset) * 100.0f));
+    return sendCommandWithWord(0x5403, raw);
+  }
+
+  bool saveSettings(bool asc_enabled, float temperature_offset,
+                    uint16_t altitude) override {
+    const uint16_t raw_offset =
+        static_cast<uint16_t>(std::round(std::max(0.0f, temperature_offset) * 100.0f));
+    bool ok = sendCommandWithWord(0x5306, asc_enabled ? 1 : 0);
+    delay(5);
+    ok = ok && sendCommandWithWord(0x5403, raw_offset);
+    delay(5);
+    ok = ok && sendCommandWithWord(0x5102, altitude);
+    return ok;
+  }
+
+  // The SCD30 only accepts a reference concentration; unlike the SCD4x it
+  // does not report back how far it had to correct.
+  bool performForcedRecalibration(uint16_t target, int16_t& correction) override {
+    correction = 0;
+    return sendCommandWithWord(0x5204, target);
+  }
+
+  bool reportsForcedRecalibrationCorrection() const override { return false; }
+
+ private:
+  static float wordsToFloat(uint16_t high, uint16_t low) {
+    const uint32_t bits = (static_cast<uint32_t>(high) << 16) | low;
+    float value = 0.0f;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+  }
+
+  static bool sendCommand(uint16_t command) {
+    Wire.beginTransmission(config::kScd30Address);
+    Wire.write(static_cast<uint8_t>(command >> 8));
+    Wire.write(static_cast<uint8_t>(command));
+    return Wire.endTransmission() == 0;
+  }
+
+  static bool sendCommandWithWord(uint16_t command, uint16_t value) {
+    const uint8_t bytes[2] = {static_cast<uint8_t>(value >> 8),
+                              static_cast<uint8_t>(value)};
+    Wire.beginTransmission(config::kScd30Address);
+    Wire.write(static_cast<uint8_t>(command >> 8));
+    Wire.write(static_cast<uint8_t>(command));
+    Wire.write(bytes, sizeof(bytes));
+    Wire.write(sensirionCrc8(bytes, sizeof(bytes)));
+    return Wire.endTransmission() == 0;
+  }
+
+  static bool readWords(uint16_t command, uint16_t* words, size_t count,
+                       uint16_t delay_ms) {
+    if (!sendCommand(command)) {
+      return false;
+    }
+    delay(delay_ms);
+
+    const size_t bytes_needed = count * 3;
+    if (Wire.requestFrom(config::kScd30Address,
+                         static_cast<uint8_t>(bytes_needed)) != bytes_needed) {
+      return false;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+      uint8_t bytes[2] = {static_cast<uint8_t>(Wire.read()),
+                          static_cast<uint8_t>(Wire.read())};
+      const uint8_t received_crc = static_cast<uint8_t>(Wire.read());
+      if (sensirionCrc8(bytes, 2) != received_crc) {
         return false;
       }
       words[i] = static_cast<uint16_t>(bytes[0] << 8) | bytes[1];
@@ -324,9 +495,16 @@ class Scd4x {
 
 namespace {
 
+enum class SensorType : uint8_t {
+  kAuto,
+  kScd4x,
+  kScd30,
+};
+
 CydDisplay display;
 CydDisplay& canvas = display;
-Scd4x sensor;
+std::unique_ptr<Co2Sensor> sensor;
+SensorType configured_sensor_type = SensorType::kAuto;
 Preferences preferences;
 WiFiManager wifi_manager;
 WebServer web_server(80);
@@ -539,20 +717,79 @@ void resetStabilizationWindows() {
   minute_environment_sample_count = 0;
 }
 
+bool probeI2cAddress(uint8_t address) {
+  Wire.beginTransmission(address);
+  return Wire.endTransmission() == 0;
+}
+
+std::unique_ptr<Co2Sensor> createSensor(SensorType type) {
+  switch (type) {
+    case SensorType::kScd4x:
+      return std::unique_ptr<Co2Sensor>(new Scd4x());
+    case SensorType::kScd30:
+      return std::unique_ptr<Co2Sensor>(new Scd30());
+    default:
+      return nullptr;
+  }
+}
+
+// Ensures `sensor` points at a sensor implementation, creating one on first
+// use. When the user has not pinned a specific model, this probes the I2C
+// bus for whichever fixed address answers (SCD4x sensors sit at 0x62, SCD30
+// at 0x61) and instantiates the matching driver.
+bool ensureSensorInstance() {
+  if (sensor != nullptr) return true;
+
+  static bool i2c_started = false;
+  if (!i2c_started) {
+    Wire.begin(config::kI2cSdaPin, config::kI2cSclPin);
+    Wire.setClock(100000);
+    delay(30);
+    i2c_started = true;
+  }
+
+  if (configured_sensor_type != SensorType::kAuto) {
+    sensor = createSensor(configured_sensor_type);
+    return sensor != nullptr;
+  }
+
+  SensorType detected = SensorType::kAuto;
+  if (probeI2cAddress(config::kScd4xAddress)) {
+    detected = SensorType::kScd4x;
+  } else if (probeI2cAddress(config::kScd30Address)) {
+    detected = SensorType::kScd30;
+  } else {
+    return false;
+  }
+  sensor = createSensor(detected);
+  if (sensor != nullptr) {
+    Serial.printf("Auto-detected CO2 sensor: %s\n", sensor->name());
+  }
+  return sensor != nullptr;
+}
+
 void startSensor() {
   last_sensor_attempt_ms = millis();
+  if (!ensureSensorInstance()) {
+    sensor_ready = false;
+    consecutive_sensor_misses = 0;
+    last_reading_ms = millis();
+    Serial.println("No CO2 sensor detected on I2C bus");
+    return;
+  }
+
   const bool factory_reset = sensor_recovery_attempts >= 3;
   sensor_ready =
-      factory_reset ? sensor.factoryReset() : sensor.begin();
+      factory_reset ? sensor->factoryReset() : sensor->begin();
   if (factory_reset && sensor_ready) {
     preferences.remove("cal_defaults");
     sensor_recovery_attempts = 0;
-    Serial.println("SCD4x factory reset completed");
+    Serial.printf("%s factory reset completed\n", sensor->name());
   }
   consecutive_sensor_misses = 0;
   last_reading_ms = millis();
   resetStabilizationWindows();
-  Serial.printf("SCD4x init: %s\n", sensor_ready ? "OK" : "FAILED");
+  Serial.printf("%s init: %s\n", sensor->name(), sensor_ready ? "OK" : "FAILED");
 }
 
 void initializeCalibrationDefaults() {
@@ -561,26 +798,28 @@ void initializeCalibrationDefaults() {
   if (preferences.isKey("cal_defaults")) {
     calibration_busy = true;
     calibration_loaded =
-        sensor.readSettings(asc_enabled, calibration_temperature_offset,
-                            calibration_altitude);
+        sensor->readSettings(asc_enabled, calibration_temperature_offset,
+                             calibration_altitude);
     calibration_busy = false;
     last_reading_ms = millis();
     resetStabilizationWindows();
-    Serial.printf("SCD4x calibration settings cache: %s\n",
+    Serial.printf("%s calibration settings cache: %s\n", sensor->name(),
                   calibration_loaded ? "OK" : "FAILED");
     return;
   }
 
-  if (sensor.saveSettings(asc_enabled, 0.0f, 0)) {
+  if (sensor->saveSettings(asc_enabled, 0.0f, 0)) {
     preferences.putBool("cal_defaults", true);
     calibration_temperature_offset = 0.0f;
     calibration_altitude = 0;
     calibration_loaded = true;
     last_reading_ms = millis();
     resetStabilizationWindows();
-    Serial.println("SCD4x temperature offset and altitude set to zero");
+    Serial.printf("%s temperature offset and altitude set to zero\n",
+                  sensor->name());
   } else {
-    Serial.println("Could not initialize SCD4x calibration defaults");
+    Serial.printf("Could not initialize %s calibration defaults\n",
+                  sensor->name());
   }
 }
 
@@ -1029,6 +1268,10 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <section class="settings" id="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
 <div class="card settings-panel">
 <div class="settings-head"><div><div class="eyebrow">Sensor configuration</div><h2 id="settings-title">SETTINGS</h2></div><button class="close" id="settings-close" aria-label="Close settings">&times;</button></div>
+<form id="sensor-type-form">
+<div class="field"><label for="sensor-type">CO2 sensor</label><select id="sensor-type"><option value="auto">Auto-detect</option><option value="scd4x">SCD4x (SCD40 / SCD41)</option><option value="scd30">SCD30</option></select><div class="help">Auto-detect uses whichever sensor answers on the I2C bus at boot. Active sensor: <strong id="sensor-active">--</strong></div></div>
+<button class="primary" id="sensor-type-save" type="submit">Save sensor type</button>
+</form>
 <form id="settings-form">
 <div class="field field-row"><div><label for="asc">Automatic self-calibration</label><div class="help">Best for regularly occupied, well-ventilated rooms.</div></div><input id="asc" type="checkbox"></div>
 <div class="field"><label for="offset">Temperature offset</label><input id="offset" type="number" min="0" max="10" step="0.1" inputmode="decimal"><div class="help">Compensates for sensor self-heating, from 0.0 to 10.0 &deg;C.</div></div>
@@ -1094,12 +1337,15 @@ async function loadMonth(value){
 }
 async function postSettings(values){const response=await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(values)});const data=await response.json();if(!response.ok)throw Error(data.message||"Request failed");return data}
 async function postDisplaySettings(values){const response=await fetch("/api/display-settings",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(values)});const data=await response.json();if(!response.ok)throw Error(data.message||"Request failed");return data}
+async function postSensorType(values){const response=await fetch("/api/sensor-type",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(values)});const data=await response.json();if(!response.ok)throw Error(data.message||"Request failed");return data}
+async function getSensorType(){try{const d=await getJson("/api/sensor-type");$("sensor-type").value=d.configured;$("sensor-active").textContent=d.active}catch(e){}}
 async function openSettings(){
  $("settings").classList.add("open");$("settings-message").textContent="Reading sensor settings...";
  try{const d=await getJson("/api/settings");$("asc").checked=d.asc;$("offset").value=d.temperature_offset.toFixed(1);$("reference").value=String(d.reference);$("settings-message").textContent=d.sensor_ready?"":"Sensor is not ready."}
  catch(e){$("settings-message").textContent="Could not read sensor settings."}
  try{const d=await getJson("/api/display-settings");$("color-order").value=d.color_order}
  catch(e){}
+ await getSensorType();
 }
 function closeSettings(){$("settings").classList.remove("open")}
 function draw(){
@@ -1130,6 +1376,7 @@ document.querySelectorAll("button[data-month-metric]").forEach(b=>b.addEventList
 $("settings-open").addEventListener("click",openSettings);$("settings-close").addEventListener("click",closeSettings);$("settings").addEventListener("click",e=>{if(e.target===$("settings"))closeSettings()});
 $("settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("settings-save");button.disabled=true;$("settings-message").textContent="Saving settings...";try{const d=await postSettings({action:"save",asc:$("asc").checked?"1":"0",offset:$("offset").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
+$("sensor-type-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("sensor-type-save");button.disabled=true;$("settings-message").textContent="Saving sensor type...";try{const d=await postSensorType({sensor_type:$("sensor-type").value});$("settings-message").textContent=d.message;await getSensorType()}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("frc").addEventListener("click",async()=>{const reference=$("reference").value;if(!confirm(`Run forced recalibration at ${reference} ppm? The sensor must have been in stable reference air for at least three minutes.`))return;const button=$("frc");button.disabled=true;$("settings-message").textContent="Recalibrating sensor...";try{const d=await postSettings({action:"frc",reference});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 addEventListener("keydown",e=>{if(e.key==="Escape")closeSettings()});
 addEventListener("resize",()=>{draw();drawMonthly()});updateStatus();loadTrend();loadMonths();setInterval(updateStatus,5000);setInterval(loadTrend,10000);
@@ -1580,7 +1827,7 @@ void handleWebSettingsPost() {
     calibration_busy = true;
     const bool next_asc = asc_value == "1";
     const bool ok =
-        sensor.saveSettings(next_asc, offset, calibration_altitude);
+        sensor->saveSettings(next_asc, offset, calibration_altitude);
     calibration_busy = false;
     last_reading_ms = millis();
     if (!ok) {
@@ -1606,7 +1853,7 @@ void handleWebSettingsPost() {
 
     calibration_busy = true;
     int16_t correction = 0;
-    const bool ok = sensor.performForcedRecalibration(
+    const bool ok = sensor->performForcedRecalibration(
         static_cast<uint16_t>(reference), correction);
     calibration_busy = false;
     current.valid = false;
@@ -1619,8 +1866,12 @@ void handleWebSettingsPost() {
 
     calibration_target = static_cast<uint16_t>(reference);
     resetStabilizationWindows();
-    sendWebMessage(200, true, "Forced recalibration completed.", correction,
-                   true);
+    if (sensor->reportsForcedRecalibrationCorrection()) {
+      sendWebMessage(200, true, "Forced recalibration completed.", correction,
+                    true);
+    } else {
+      sendWebMessage(200, true, "Forced recalibration completed.");
+    }
     return;
   }
 
@@ -1650,6 +1901,74 @@ void handleWebDisplaySettingsPost() {
   sendWebMessage(200, true, "Display setting saved.");
 }
 
+const char* sensorTypeToString(SensorType type) {
+  switch (type) {
+    case SensorType::kScd4x:
+      return "scd4x";
+    case SensorType::kScd30:
+      return "scd30";
+    default:
+      return "auto";
+  }
+}
+
+bool sensorTypeFromString(const String& value, SensorType& type) {
+  if (value == "auto") {
+    type = SensorType::kAuto;
+    return true;
+  }
+  if (value == "scd4x") {
+    type = SensorType::kScd4x;
+    return true;
+  }
+  if (value == "scd30") {
+    type = SensorType::kScd30;
+    return true;
+  }
+  return false;
+}
+
+void handleWebSensorTypeGet() {
+  String json;
+  json.reserve(96);
+  json = F("{\"configured\":\"");
+  json += sensorTypeToString(configured_sensor_type);
+  json += F("\",\"active\":\"");
+  json += sensor != nullptr ? sensor->name() : "none";
+  json += F("\"}");
+  web_server.sendHeader(F("Cache-Control"), F("no-store"));
+  web_server.send(200, F("application/json"), json);
+}
+
+void handleWebSensorTypePost() {
+  SensorType requested = SensorType::kAuto;
+  if (!sensorTypeFromString(web_server.arg("sensor_type"), requested)) {
+    sendWebMessage(400, false, "Sensor type must be auto, scd4x, or scd30.");
+    return;
+  }
+
+  configured_sensor_type = requested;
+  preferences.putUChar("sensor_type", static_cast<uint8_t>(requested));
+  preferences.remove("cal_defaults");
+  sensor.reset();
+  sensor_ready = false;
+  calibration_loaded = false;
+  consecutive_sensor_misses = 0;
+  sensor_recovery_attempts = 0;
+  startSensor();
+  initializeCalibrationDefaults();
+
+  char message[64] = {};
+  if (sensor != nullptr) {
+    snprintf(message, sizeof(message), "Sensor type saved. Active sensor: %s.",
+             sensor->name());
+  } else {
+    snprintf(message, sizeof(message),
+             "Sensor type saved. No sensor detected yet.");
+  }
+  sendWebMessage(200, true, message);
+}
+
 void handleWebTrend();
 
 void startWebDashboard() {
@@ -1668,6 +1987,8 @@ void startWebDashboard() {
   web_server.on("/api/settings", HTTP_POST, handleWebSettingsPost);
   web_server.on("/api/display-settings", HTTP_GET, handleWebDisplaySettingsGet);
   web_server.on("/api/display-settings", HTTP_POST, handleWebDisplaySettingsPost);
+  web_server.on("/api/sensor-type", HTTP_GET, handleWebSensorTypeGet);
+  web_server.on("/api/sensor-type", HTTP_POST, handleWebSensorTypePost);
   web_server.onNotFound([]() {
     web_server.send(404, F("text/plain"), F("Not found"));
   });
@@ -2429,8 +2750,8 @@ void loadCalibrationSettings() {
   snprintf(calibration_status, sizeof(calibration_status),
            "Reading sensor settings...");
   if (!sensor_ready ||
-      !sensor.readSettings(asc_enabled, calibration_temperature_offset,
-                           calibration_altitude)) {
+      !sensor->readSettings(asc_enabled, calibration_temperature_offset,
+                            calibration_altitude)) {
     snprintf(calibration_status, sizeof(calibration_status),
              "Could not read sensor settings");
   } else {
@@ -2453,7 +2774,10 @@ void drawCalibrationScreen() {
   canvas.setTextDatum(textdatum_t::middle_left);
   canvas.setFont(&fonts::Font2);
   canvas.setTextColor(kWhite);
-  canvas.drawString("SCD40 CALIBRATION", 12, 15);
+  char calibration_title[32] = {};
+  snprintf(calibration_title, sizeof(calibration_title), "%s CALIBRATION",
+           sensor != nullptr ? sensor->name() : "SENSOR");
+  canvas.drawString(calibration_title, 12, 15);
   drawRoundedPanel(28, 30, 264, 181);
   char label[40] = {};
   snprintf(label, sizeof(label), "AUTO CALIBRATION: %s",
@@ -2502,7 +2826,7 @@ void activateCalibrationItem() {
     case CalibrationItem::kAutomaticCalibration: {
       calibration_busy = true;
       const bool next = !asc_enabled;
-      const bool ok = sensor.setAutomaticSelfCalibration(next);
+      const bool ok = sensor->setAutomaticSelfCalibration(next);
       if (ok) asc_enabled = next;
       calibration_busy = false;
       finishCalibrationAction(ok, asc_enabled ? "ASC enabled"
@@ -2513,7 +2837,7 @@ void activateCalibrationItem() {
       float next = calibration_temperature_offset + 0.5f;
       if (next > 10.0f) next = 0.0f;
       calibration_busy = true;
-      const bool ok = sensor.setTemperatureOffset(next);
+      const bool ok = sensor->setTemperatureOffset(next);
       if (ok) calibration_temperature_offset = next;
       calibration_busy = false;
       char result[48] = {};
@@ -2543,14 +2867,18 @@ void activateCalibrationItem() {
       calibration_busy = true;
       int16_t correction = 0;
       const bool ok =
-          sensor.performForcedRecalibration(calibration_target, correction);
+          sensor->performForcedRecalibration(calibration_target, correction);
       calibration_busy = false;
       current.valid = false;
       consecutive_sensor_misses = 0;
       last_reading_ms = millis();
       char result[48] = {};
-      snprintf(result, sizeof(result), "FRC complete: correction %+d ppm",
-               correction);
+      if (sensor->reportsForcedRecalibrationCorrection()) {
+        snprintf(result, sizeof(result), "FRC complete: correction %+d ppm",
+                 correction);
+      } else {
+        snprintf(result, sizeof(result), "FRC complete");
+      }
       finishCalibrationAction(ok, result);
       break;
     }
@@ -2736,6 +3064,10 @@ void setup() {
     display_metric = static_cast<DisplayMetric>(saved_metric);
   }
   display.setColorOrderRgb(preferences.getUChar("color_order", 0) != 0);
+  const uint8_t saved_sensor_type = preferences.getUChar("sensor_type", 0);
+  if (saved_sensor_type <= static_cast<uint8_t>(SensorType::kScd30)) {
+    configured_sensor_type = static_cast<SensorType>(saved_sensor_type);
+  }
   loadHistory();
   display.startWrite();
   drawStaticDashboard();
@@ -2788,7 +3120,7 @@ void loop() {
   float temperature = NAN;
   float humidity = NAN;
   bool has_new_reading = false;
-  if (sensor.readIfReady(co2, temperature, humidity)) {
+  if (sensor->readIfReady(co2, temperature, humidity)) {
     consecutive_sensor_misses = 0;
     sensor_recovery_attempts = 0;
     current.co2 = co2;
@@ -2807,7 +3139,8 @@ void loop() {
                   co2, temperature, humidity);
   } else if (++consecutive_sensor_misses >=
              config::kSensorMissesBeforeRestart) {
-    Serial.println("SCD4x not producing readings; restarting measurement");
+    Serial.printf("%s not producing readings; restarting measurement\n",
+                  sensor->name());
     current.valid = false;
     co2_reading_valid = false;
     environmental_reading_valid = false;
