@@ -117,6 +117,19 @@ class CydDisplay : public lgfx::LGFX_Device {
 
     setPanel(&panel_);
   }
+
+  // Some CYD boards ship with the ILI9341 wired for RGB order instead of
+  // BGR, which swaps red and blue on screen. Rather than requiring a
+  // rebuild, this flips the panel's MADCTL color-order bit at runtime.
+  void setColorOrderRgb(bool rgb_order) {
+    auto cfg = panel_.config();
+    if (cfg.rgb_order == rgb_order) return;
+    cfg.rgb_order = rgb_order;
+    panel_.config(cfg);
+    setRotation(getRotation());
+  }
+
+  bool colorOrderRgb() const { return panel_.config().rgb_order; }
 };
 
 class Scd4x {
@@ -1021,6 +1034,10 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <div class="field"><label for="offset">Temperature offset</label><input id="offset" type="number" min="0" max="10" step="0.1" inputmode="decimal"><div class="help">Compensates for sensor self-heating, from 0.0 to 10.0 &deg;C.</div></div>
 <button class="primary" id="settings-save" type="submit">Save sensor settings</button>
 </form>
+<form id="display-settings-form">
+<div class="field"><label for="color-order">Screen colour order</label><select id="color-order"><option value="bgr">BGR</option><option value="rgb">RGB</option></select><div class="help">If red and blue appear swapped on screen, switch this to match your panel's wiring.</div></div>
+<button class="primary" id="display-settings-save" type="submit">Save display setting</button>
+</form>
 <div class="danger-zone">
 <div class="field"><label for="reference">Forced recalibration reference</label><select id="reference"><option value="400">400 ppm</option><option value="420" selected>420 ppm</option><option value="450">450 ppm</option></select><div class="help">Only recalibrate after at least three minutes in stable air at the selected concentration.</div></div>
 <button class="danger" id="frc" type="button">Run forced recalibration</button>
@@ -1076,10 +1093,13 @@ async function loadMonth(value){
  catch(e){monthly=null;$("history-message").textContent="Could not load the selected month.";drawMonthly()}
 }
 async function postSettings(values){const response=await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(values)});const data=await response.json();if(!response.ok)throw Error(data.message||"Request failed");return data}
+async function postDisplaySettings(values){const response=await fetch("/api/display-settings",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(values)});const data=await response.json();if(!response.ok)throw Error(data.message||"Request failed");return data}
 async function openSettings(){
  $("settings").classList.add("open");$("settings-message").textContent="Reading sensor settings...";
  try{const d=await getJson("/api/settings");$("asc").checked=d.asc;$("offset").value=d.temperature_offset.toFixed(1);$("reference").value=String(d.reference);$("settings-message").textContent=d.sensor_ready?"":"Sensor is not ready."}
  catch(e){$("settings-message").textContent="Could not read sensor settings."}
+ try{const d=await getJson("/api/display-settings");$("color-order").value=d.color_order}
+ catch(e){}
 }
 function closeSettings(){$("settings").classList.remove("open")}
 function draw(){
@@ -1109,6 +1129,7 @@ document.querySelectorAll("[data-live-metric]").forEach(card=>card.addEventListe
 document.querySelectorAll("button[data-month-metric]").forEach(b=>b.addEventListener("click",()=>{monthlyMetric=b.dataset.monthMetric;document.querySelectorAll("button[data-month-metric]").forEach(x=>x.classList.toggle("active",x===b));drawMonthly()}));$("month").addEventListener("change",e=>loadMonth(e.target.value));
 $("settings-open").addEventListener("click",openSettings);$("settings-close").addEventListener("click",closeSettings);$("settings").addEventListener("click",e=>{if(e.target===$("settings"))closeSettings()});
 $("settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("settings-save");button.disabled=true;$("settings-message").textContent="Saving settings...";try{const d=await postSettings({action:"save",asc:$("asc").checked?"1":"0",offset:$("offset").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
+$("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("frc").addEventListener("click",async()=>{const reference=$("reference").value;if(!confirm(`Run forced recalibration at ${reference} ppm? The sensor must have been in stable reference air for at least three minutes.`))return;const button=$("frc");button.disabled=true;$("settings-message").textContent="Recalibrating sensor...";try{const d=await postSettings({action:"frc",reference});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 addEventListener("keydown",e=>{if(e.key==="Escape")closeSettings()});
 addEventListener("resize",()=>{draw();drawMonthly()});updateStatus();loadTrend();loadMonths();setInterval(updateStatus,5000);setInterval(loadTrend,10000);
@@ -1606,6 +1627,29 @@ void handleWebSettingsPost() {
   sendWebMessage(400, false, "Unknown settings action.");
 }
 
+void handleWebDisplaySettingsGet() {
+  String json;
+  json.reserve(48);
+  json = F("{\"color_order\":\"");
+  json += display.colorOrderRgb() ? F("rgb") : F("bgr");
+  json += F("\"}");
+  web_server.sendHeader(F("Cache-Control"), F("no-store"));
+  web_server.send(200, F("application/json"), json);
+}
+
+void handleWebDisplaySettingsPost() {
+  const String color_order = web_server.arg("color_order");
+  if (color_order != "rgb" && color_order != "bgr") {
+    sendWebMessage(400, false, "Color order must be 'rgb' or 'bgr'.");
+    return;
+  }
+
+  const bool rgb_order = color_order == "rgb";
+  display.setColorOrderRgb(rgb_order);
+  preferences.putUChar("color_order", rgb_order ? 1 : 0);
+  sendWebMessage(200, true, "Display setting saved.");
+}
+
 void handleWebTrend();
 
 void startWebDashboard() {
@@ -1622,6 +1666,8 @@ void startWebDashboard() {
   web_server.on("/api/month-history", HTTP_GET, handleWebMonthHistory);
   web_server.on("/api/settings", HTTP_GET, handleWebSettingsGet);
   web_server.on("/api/settings", HTTP_POST, handleWebSettingsPost);
+  web_server.on("/api/display-settings", HTTP_GET, handleWebDisplaySettingsGet);
+  web_server.on("/api/display-settings", HTTP_POST, handleWebDisplaySettingsPost);
   web_server.onNotFound([]() {
     web_server.send(404, F("text/plain"), F("Not found"));
   });
@@ -2689,6 +2735,7 @@ void setup() {
   if (saved_metric < static_cast<uint8_t>(DisplayMetric::kCount)) {
     display_metric = static_cast<DisplayMetric>(saved_metric);
   }
+  display.setColorOrderRgb(preferences.getUChar("color_order", 0) != 0);
   loadHistory();
   display.startWrite();
   drawStaticDashboard();
