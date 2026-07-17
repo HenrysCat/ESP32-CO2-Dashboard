@@ -56,6 +56,22 @@ class CydDisplay : public lgfx::LGFX_Device {
   lgfx::Bus_SPI bus_;
   lgfx::Touch_XPT2046 touch_;
 
+  static constexpr uint8_t kMadctlMy = 0x80;
+  static constexpr uint8_t kMadctlMx = 0x40;
+  static constexpr uint8_t kMadctlMv = 0x20;
+  static constexpr uint8_t kMadctlMl = 0x10;
+  static constexpr uint8_t kMadctlBgr = 0x08;
+  static constexpr uint8_t kMadctlMh = 0x04;
+  static constexpr uint8_t kMadctlCommand = 0x36;
+  // This board's known-good wiring needs MX+MH set to appear right-side up
+  // in landscape (matches this panel's offset_rotation=6 baked in below).
+  static constexpr uint8_t kNativeOffsetRotation = 6;
+  static constexpr uint8_t kNativeMadctl = kMadctlMx | kMadctlMh;
+
+  bool color_order_rgb_ = false;
+  bool flip180_ = false;
+  bool rotate90_ = false;
+
  public:
   CydDisplay() {
     {
@@ -87,7 +103,7 @@ class CydDisplay : public lgfx::LGFX_Device {
       cfg.offset_x = 0;
       cfg.offset_y = 0;
       // This panel is mounted in a reflected 320x240 native orientation.
-      cfg.offset_rotation = 6;
+      cfg.offset_rotation = kNativeOffsetRotation;
       cfg.dummy_read_pixel = 8;
       cfg.dummy_read_bits = 1;
       cfg.readable = true;
@@ -120,18 +136,48 @@ class CydDisplay : public lgfx::LGFX_Device {
     setPanel(&panel_);
   }
 
-  // Some CYD boards ship with the ILI9341 wired for RGB order instead of
-  // BGR, which swaps red and blue on screen. Rather than requiring a
-  // rebuild, this flips the panel's MADCTL color-order bit at runtime.
-  void setColorOrderRgb(bool rgb_order) {
-    auto cfg = panel_.config();
-    if (cfg.rgb_order == rgb_order) return;
-    cfg.rgb_order = rgb_order;
-    panel_.config(cfg);
-    setRotation(getRotation());
+  // Some CYD boards ship wired for RGB colour order instead of BGR (swapped
+  // red/blue), mounted upside down, or - on some batches - with the panel's
+  // native orientation rotated 90 degrees from this board's default, which
+  // shows up as a cropped portrait image on first boot. Rather than
+  // requiring a rebuild, all three are corrected at runtime by writing the
+  // ILI9341 MADCTL register directly.
+  //
+  // This intentionally bypasses LGFX's own setRotation()/offset_rotation
+  // bookkeeping (used once at boot, via the constructor's offset_rotation
+  // and the initial display.setRotation(0) call, to size the 320x240
+  // landscape framebuffer). That bookkeeping ties the MADCTL MV bit -
+  // needed for a genuine 90 degree correction - to swapping the reported
+  // width()/height(), which the dashboard's fixed-pixel layout doesn't
+  // support. Writing MADCTL directly keeps width()/height() frozen at
+  // 320x240 no matter which combination is selected.
+  //
+  // Because this only changes how the existing GRAM contents are scanned
+  // out, the caller must trigger a full redraw afterwards or the screen
+  // will look garbled. It also does not touch the touch panel's coordinate
+  // transform (separate hardware, calibrated for the native orientation),
+  // so callers correct touch points for flip180 themselves; rotate90 is not
+  // touch-corrected, matching the CYD ham dashboard project this was
+  // ported from.
+  void applyDisplaySettings(bool rgb_order, bool flip180, bool rotate90) {
+    color_order_rgb_ = rgb_order;
+    flip180_ = flip180;
+    rotate90_ = rotate90;
+
+    uint8_t madctl = kNativeMadctl;
+    if (flip180) madctl ^= (kMadctlMx | kMadctlMh | kMadctlMy | kMadctlMl);
+    if (rotate90) madctl |= kMadctlMv;
+    madctl |= rgb_order ? 0 : kMadctlBgr;
+
+    startWrite();
+    panel_.writeCommand(kMadctlCommand, 1);
+    panel_.writeData(madctl, 1);
+    endWrite();
   }
 
-  bool colorOrderRgb() const { return panel_.config().rgb_order; }
+  bool colorOrderRgb() const { return color_order_rgb_; }
+  bool flip180() const { return flip180_; }
+  bool rotate90() const { return rotate90_; }
 };
 
 uint8_t sensirionCrc8(const uint8_t* data, size_t length) {
@@ -542,6 +588,7 @@ unsigned long co2_ready_ms = 0;
 unsigned long environmental_logging_ready_ms = 0;
 unsigned long last_sd_attempt_ms = 0;
 int last_clock_minute = -1;
+bool last_top_bar_wifi_connected = false;
 uint32_t boot_id = 0;
 bool sensor_ready = false;
 bool co2_reading_valid = false;
@@ -640,15 +687,116 @@ struct PersistedHistory {
 constexpr uint32_t kHistoryMagic = 0x434F3248;
 constexpr uint16_t kHistoryVersion = 1;
 
-constexpr uint32_t kBackground = 0x07111F;
-constexpr uint32_t kPanel = 0x0E2034;
-constexpr uint32_t kPanelLight = 0x15304B;
-constexpr uint32_t kWhite = 0xF4F7FB;
-constexpr uint32_t kMuted = 0x7794AC;
+enum class DisplayTheme : uint8_t {
+  kDefault = 0,
+  kBlackRed,
+  kSlateGreen,
+  kVioletDusk,
+  kMidnightBlue,
+  kMauve,
+  kCount,
+};
+
+struct DisplayPalette {
+  uint32_t background;
+  uint32_t panel;
+  uint32_t panel_light;
+  uint32_t white;
+  uint32_t muted;
+};
+
+// Mirrors the web dashboard's colour themes (see kDashboardHtml's :root
+// blocks) where practical, though the two surfaces apply their choices
+// independently and don't have to match exactly. CO2/temperature/humidity
+// quality colours (kGreen/kAmber/kRed/kBlue below) intentionally stay
+// fixed across every theme so they keep meaning "good/warn/bad air", not
+// just decoration.
+//
+// kDefault/kSlateGreen/kVioletDusk render correctly as authored on real
+// hardware with the "Screen colour order" display setting on BGR (this
+// board's correct setting - confirmed since those three all look right).
+// kBlackRed and kMidnightBlue, tuned the same way, instead came out with
+// red and blue visibly swapped once BGR is the active order (kBlackRed
+// read as blue, kMidnightBlue as purple) - but looked right when that
+// display setting was switched to RGB. Rather than requiring the whole
+// device to run in RGB (which would break the other three themes), their
+// R and B bytes are pre-swapped here ("BBGGRR" instead of "RRGGBB") so
+// that, once BGR swaps them back on the way to the panel, they land on
+// the same colours that looked right under RGB. kMauve is built the same
+// way from kVioletDusk, matching the "mauve" look seen when Violet dusk
+// was tried under RGB. kBlackRed's panel/panel_light were further pushed
+// to a pure red (no green component) after the swap-compensated version
+// still rendered as brown.
+constexpr DisplayPalette kDisplayPalettes[] = {
+    {0x07111F, 0x0E2034, 0x15304B, 0xF4F7FB, 0x7794AC},  // Default
+    {0x000000, 0x000030, 0x000068, 0xE6ECF7, 0x6078AD},  // Black/red
+    {0x050F0C, 0x0A1E18, 0x173A2E, 0xEAF7F0, 0x7FAE95},  // Slate green
+    {0x0D0714, 0x1A0E2A, 0x3A2050, 0xF3ECFA, 0xA48FC0},  // Violet dusk
+    {0x180808, 0x40140E, 0x602018, 0xFAF2F0, 0xC09088},  // Midnight blue
+    {0x14070D, 0x2A0E1A, 0x50203A, 0xFAECF3, 0xC08FA4},  // Mauve
+};
+
+// These five hold the active theme's colours and are updated at runtime by
+// applyDisplayTheme() - despite the "k" naming (kept to avoid touching
+// every one of their many call sites), they are not compile-time constants.
+uint32_t kBackground = kDisplayPalettes[0].background;
+uint32_t kPanel = kDisplayPalettes[0].panel;
+uint32_t kPanelLight = kDisplayPalettes[0].panel_light;
+uint32_t kWhite = kDisplayPalettes[0].white;
+uint32_t kMuted = kDisplayPalettes[0].muted;
 constexpr uint32_t kGreen = 0x42D392;
 constexpr uint32_t kAmber = 0xFFB547;
 constexpr uint32_t kRed = 0xFF5D73;
 constexpr uint32_t kBlue = 0x50B8FF;
+
+DisplayTheme display_theme = DisplayTheme::kDefault;
+
+void applyDisplayTheme(DisplayTheme theme) {
+  const DisplayPalette& palette =
+      kDisplayPalettes[static_cast<uint8_t>(theme)];
+  display_theme = theme;
+  kBackground = palette.background;
+  kPanel = palette.panel;
+  kPanelLight = palette.panel_light;
+  kWhite = palette.white;
+  kMuted = palette.muted;
+}
+
+const char* displayThemeToString(DisplayTheme theme) {
+  switch (theme) {
+    case DisplayTheme::kBlackRed:
+      return "black-red";
+    case DisplayTheme::kSlateGreen:
+      return "slate-green";
+    case DisplayTheme::kVioletDusk:
+      return "violet-dusk";
+    case DisplayTheme::kMidnightBlue:
+      return "midnight-blue";
+    case DisplayTheme::kMauve:
+      return "mauve";
+    default:
+      return "default";
+  }
+}
+
+bool displayThemeFromString(const String& value, DisplayTheme& theme) {
+  if (value == "default") {
+    theme = DisplayTheme::kDefault;
+  } else if (value == "black-red") {
+    theme = DisplayTheme::kBlackRed;
+  } else if (value == "slate-green") {
+    theme = DisplayTheme::kSlateGreen;
+  } else if (value == "violet-dusk") {
+    theme = DisplayTheme::kVioletDusk;
+  } else if (value == "midnight-blue") {
+    theme = DisplayTheme::kMidnightBlue;
+  } else if (value == "mauve") {
+    theme = DisplayTheme::kMauve;
+  } else {
+    return false;
+  }
+  return true;
+}
 
 void configureNetworkTime() {
   if (WiFi.status() != WL_CONNECTED) return;
@@ -1173,19 +1321,22 @@ const char kDashboardHtml[] PROGMEM = R"rawliteral(
 <meta name="theme-color" content="#07111f">
 <title>CO2 Dashboard</title>
 <style>
-:root{color-scheme:dark;--bg:#07111f;--panel:#0e2034;--line:#15304b;--text:#f4f7fb;--muted:#7794ac;--green:#42d392;--amber:#ffb547;--red:#ff5d73;--blue:#50b8ff}
+:root{color-scheme:dark;--bg:#07111f;--bg-glow:#102943;--card:rgba(14,32,52,.94);--field:#0a192a;--panel:#0e2034;--line:#15304b;--text:#f4f7fb;--muted:#7794ac;--accent:#50b8ff;--green:#42d392;--amber:#ffb547;--red:#ff5d73;--blue:#50b8ff}
+:root[data-theme=black-red]{--bg:#000000;--bg-glow:#1a0505;--card:rgba(20,8,8,.94);--field:#0d0505;--line:#3a1414;--text:#f7ecec;--muted:#a37878;--accent:#ff5d73}
+:root[data-theme=slate-green]{--bg:#050f0c;--bg-glow:#0f2a20;--card:rgba(10,30,24,.94);--field:#081712;--line:#173a2e;--text:#eaf7f0;--muted:#7fae95;--accent:#42d392}
+:root[data-theme=violet-dusk]{--bg:#0d0714;--bg-glow:#241033;--card:rgba(26,14,42,.94);--field:#160b22;--line:#3a2050;--text:#f3ecfa;--muted:#a48fc0;--accent:#b98bff}
 *{box-sizing:border-box}
-body{margin:0;background:radial-gradient(circle at top,#102943 0,var(--bg) 48%);color:var(--text);font:16px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
+body{margin:0;background:radial-gradient(circle at top,var(--bg-glow) 0,var(--bg) 48%);color:var(--text);font:16px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
 main{width:min(1120px,calc(100% - 28px));margin:auto;padding:28px 0 40px}
 header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:18px}
 h1{font-size:clamp(1.2rem,3vw,1.65rem);letter-spacing:.08em;margin:0}
 .header-actions{display:flex;align-items:center;gap:12px}
 .connection{color:var(--muted);font-size:.88rem;text-align:right}
 .gear{width:40px;height:40px;display:grid;place-items:center;padding:0;border-radius:50%;color:var(--muted)}
-.gear:hover,.gear:focus-visible{color:var(--blue);border-color:var(--blue)}
+.gear:hover,.gear:focus-visible{color:var(--accent);border-color:var(--accent)}
 .gear svg{width:20px;height:20px}
 .grid{display:grid;grid-template-columns:minmax(250px,.78fr) minmax(0,1.5fr);gap:16px}
-.card{background:rgba(14,32,52,.94);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 45px rgba(0,0,0,.2)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 45px rgba(0,0,0,.2)}
 .reading{padding:24px;display:flex;min-height:340px;flex-direction:column;justify-content:space-between}
 .reading-value{font-size:clamp(4.5rem,12vw,8rem);font-weight:750;line-height:.85;letter-spacing:-.07em;margin:24px 0 8px}
 .eyebrow{color:var(--muted);font-size:.78rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
@@ -1196,14 +1347,14 @@ h1{font-size:clamp(1.2rem,3vw,1.65rem);letter-spacing:.08em;margin:0}
 .trend{padding:20px;min-height:340px}
 .trend-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
 .ranges{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
-button{border:1px solid var(--line);border-radius:999px;background:#0a192a;color:var(--muted);padding:7px 11px;font:inherit;font-size:.78rem;cursor:pointer}
-button.active{color:var(--blue);border-color:var(--blue);background:rgba(80,184,255,.09)}
+button{border:1px solid var(--line);border-radius:999px;background:var(--field);color:var(--muted);padding:7px 11px;font:inherit;font-size:.78rem;cursor:pointer}
+button.active{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,transparent)}
 .chart-wrap{height:260px;position:relative}
 canvas{width:100%;height:100%;display:block}
 .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:16px}
 .metric{padding:20px;cursor:pointer;transition:border-color .15s,transform .15s}
 .metric:hover{transform:translateY(-1px)}
-.metric.active{border-color:var(--blue)}
+.metric.active{border-color:var(--accent)}
 .metric-value{font-size:clamp(2rem,6vw,3.3rem);font-weight:700;margin-top:8px}
 .metric[data-live-metric=co2] .metric-value{color:var(--green)}
 .metric[data-live-metric=temperature] .metric-value{color:var(--amber)}
@@ -1214,7 +1365,7 @@ canvas{width:100%;height:100%;display:block}
 .monthly-controls select{width:auto;min-width:150px;padding:7px 34px 7px 11px;border-radius:999px;font-size:.82rem}
 .monthly-chart{height:300px}
 .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
-.summary div{background:#0a192a;border:1px solid var(--line);border-radius:12px;padding:12px}
+.summary div{background:var(--field);border:1px solid var(--line);border-radius:12px;padding:12px}
 .summary span{display:block;color:var(--muted);font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
 .summary strong{display:block;font-size:1.3rem;margin-top:3px}
 .settings{position:fixed;inset:0;z-index:10;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(3,9,16,.78);backdrop-filter:blur(10px)}
@@ -1227,9 +1378,9 @@ canvas{width:100%;height:100%;display:block}
 .field-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
 label{color:var(--text);font-weight:650}
 .help{color:var(--muted);font-size:.82rem}
-input[type=number],select{width:100%;border:1px solid var(--line);border-radius:10px;background:#0a192a;color:var(--text);padding:11px 12px;font:inherit}
+input[type=number],select{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--text);padding:11px 12px;font:inherit}
 input[type=checkbox]{width:42px;height:22px;accent-color:var(--green)}
-.primary{width:100%;border-color:var(--blue);color:var(--blue);padding:11px 16px;border-radius:10px;font-weight:700}
+.primary{width:100%;border-color:var(--accent);color:var(--accent);padding:11px 16px;border-radius:10px;font-weight:700}
 .danger-zone{border-top:1px solid var(--line);margin-top:24px;padding-top:20px}
 .danger{width:100%;border-color:var(--red);color:var(--red);padding:11px 16px;border-radius:10px;font-weight:700}
 .message{min-height:22px;margin-top:12px;color:var(--muted);font-size:.86rem}
@@ -1268,6 +1419,7 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <section class="settings" id="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
 <div class="card settings-panel">
 <div class="settings-head"><div><div class="eyebrow">Sensor configuration</div><h2 id="settings-title">SETTINGS</h2></div><button class="close" id="settings-close" aria-label="Close settings">&times;</button></div>
+<div class="field"><label for="theme">Dashboard colour theme</label><select id="theme"><option value="midnight">Midnight blue (default)</option><option value="black-red">Black / red</option><option value="slate-green">Slate green</option><option value="violet-dusk">Violet dusk</option></select><div class="help">Changes the colour of this web dashboard only, on this device/browser.</div></div>
 <form id="sensor-type-form">
 <div class="field"><label for="sensor-type">CO2 sensor</label><select id="sensor-type"><option value="auto">Auto-detect</option><option value="scd4x">SCD4x (SCD40 / SCD41)</option><option value="scd30">SCD30</option></select><div class="help">Auto-detect uses whichever sensor answers on the I2C bus at boot. Active sensor: <strong id="sensor-active">--</strong></div></div>
 <button class="primary" id="sensor-type-save" type="submit">Save sensor type</button>
@@ -1278,7 +1430,10 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <button class="primary" id="settings-save" type="submit">Save sensor settings</button>
 </form>
 <form id="display-settings-form">
+<div class="field"><label for="device-theme">Device colour theme</label><select id="device-theme"><option value="default">Default</option><option value="midnight-blue">Midnight blue</option><option value="black-red">Black / red</option><option value="slate-green">Slate green</option><option value="violet-dusk">Violet dusk</option><option value="mauve">Mauve</option></select><div class="help">Changes the colour of the physical screen on the device itself.</div></div>
 <div class="field"><label for="color-order">Screen colour order</label><select id="color-order"><option value="bgr">BGR</option><option value="rgb">RGB</option></select><div class="help">If red and blue appear swapped on screen, switch this to match your panel's wiring.</div></div>
+<div class="field field-row"><div><label for="rotate90">Rotate display 90&deg;</label><div class="help">Enable this if the screen shows portrait and cropped on first start.</div></div><input id="rotate90" type="checkbox"></div>
+<div class="field field-row"><div><label for="flip180">Flip display 180&deg;</label><div class="help">Enable this if the screen is mounted upside down.</div></div><input id="flip180" type="checkbox"></div>
 <button class="primary" id="display-settings-save" type="submit">Save display setting</button>
 </form>
 <div class="danger-zone">
@@ -1291,6 +1446,15 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <script>
 const $=id=>document.getElementById(id);
 const colors={green:"#42d392",amber:"#ffb547",red:"#ff5d73",blue:"#50b8ff",grid:"#15304b",muted:"#7794ac"};
+const themeChartColors={midnight:{grid:"#15304b",muted:"#7794ac"},"black-red":{grid:"#3a1414",muted:"#a37878"},"slate-green":{grid:"#173a2e",muted:"#7fae95"},"violet-dusk":{grid:"#3a2050",muted:"#a48fc0"}};
+const THEME_STORAGE_KEY="co2-dashboard-theme";
+function applyTheme(theme){
+ if(theme&&theme!=="midnight")document.documentElement.dataset.theme=theme;else delete document.documentElement.dataset.theme;
+ const chartColors=themeChartColors[theme]||themeChartColors.midnight;
+ colors.grid=chartColors.grid;colors.muted=chartColors.muted;
+ draw();drawMonthly();
+}
+function loadTheme(){const theme=localStorage.getItem(THEME_STORAGE_KEY)||"midnight";$("theme").value=theme;applyTheme(theme)}
 const metricInfo={co2:{label:"Carbon dioxide",trend:"CO2 trend",unit:"PPM",accent:colors.green,digits:0},temperature:{label:"Temperature",trend:"Temperature trend",unit:"\u00b0C",accent:colors.amber,digits:1},humidity:{label:"Humidity",trend:"Humidity trend",unit:"%",accent:colors.blue,digits:1}};
 let liveStatus=null,liveMetric="co2",range=10,trend={values:[]};
 let monthly=null,monthlyMetric="co2";
@@ -1343,7 +1507,7 @@ async function openSettings(){
  $("settings").classList.add("open");$("settings-message").textContent="Reading sensor settings...";
  try{const d=await getJson("/api/settings");$("asc").checked=d.asc;$("offset").value=d.temperature_offset.toFixed(1);$("reference").value=String(d.reference);$("settings-message").textContent=d.sensor_ready?"":"Sensor is not ready."}
  catch(e){$("settings-message").textContent="Could not read sensor settings."}
- try{const d=await getJson("/api/display-settings");$("color-order").value=d.color_order}
+ try{const d=await getJson("/api/display-settings");$("color-order").value=d.color_order;$("rotate90").checked=d.rotate90;$("flip180").checked=d.flip180;$("device-theme").value=d.theme}
  catch(e){}
  await getSensorType();
 }
@@ -1375,11 +1539,12 @@ document.querySelectorAll("[data-live-metric]").forEach(card=>card.addEventListe
 document.querySelectorAll("button[data-month-metric]").forEach(b=>b.addEventListener("click",()=>{monthlyMetric=b.dataset.monthMetric;document.querySelectorAll("button[data-month-metric]").forEach(x=>x.classList.toggle("active",x===b));drawMonthly()}));$("month").addEventListener("change",e=>loadMonth(e.target.value));
 $("settings-open").addEventListener("click",openSettings);$("settings-close").addEventListener("click",closeSettings);$("settings").addEventListener("click",e=>{if(e.target===$("settings"))closeSettings()});
 $("settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("settings-save");button.disabled=true;$("settings-message").textContent="Saving settings...";try{const d=await postSettings({action:"save",asc:$("asc").checked?"1":"0",offset:$("offset").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
-$("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
+$("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value,rotate90:$("rotate90").checked?"1":"0",flip180:$("flip180").checked?"1":"0",theme:$("device-theme").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("sensor-type-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("sensor-type-save");button.disabled=true;$("settings-message").textContent="Saving sensor type...";try{const d=await postSensorType({sensor_type:$("sensor-type").value});$("settings-message").textContent=d.message;await getSensorType()}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("frc").addEventListener("click",async()=>{const reference=$("reference").value;if(!confirm(`Run forced recalibration at ${reference} ppm? The sensor must have been in stable reference air for at least three minutes.`))return;const button=$("frc");button.disabled=true;$("settings-message").textContent="Recalibrating sensor...";try{const d=await postSettings({action:"frc",reference});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 addEventListener("keydown",e=>{if(e.key==="Escape")closeSettings()});
-addEventListener("resize",()=>{draw();drawMonthly()});updateStatus();loadTrend();loadMonths();setInterval(updateStatus,5000);setInterval(loadTrend,10000);
+$("theme").addEventListener("change",()=>{const theme=$("theme").value;localStorage.setItem(THEME_STORAGE_KEY,theme);applyTheme(theme)});
+addEventListener("resize",()=>{draw();drawMonthly()});loadTheme();updateStatus();loadTrend();loadMonths();setInterval(updateStatus,5000);setInterval(loadTrend,10000);
 </script>
 </body>
 </html>
@@ -1880,24 +2045,55 @@ void handleWebSettingsPost() {
 
 void handleWebDisplaySettingsGet() {
   String json;
-  json.reserve(48);
+  json.reserve(128);
   json = F("{\"color_order\":\"");
   json += display.colorOrderRgb() ? F("rgb") : F("bgr");
+  json += F("\",\"flip180\":");
+  json += display.flip180() ? F("true") : F("false");
+  json += F(",\"rotate90\":");
+  json += display.rotate90() ? F("true") : F("false");
+  json += F(",\"theme\":\"");
+  json += displayThemeToString(display_theme);
   json += F("\"}");
   web_server.sendHeader(F("Cache-Control"), F("no-store"));
   web_server.send(200, F("application/json"), json);
 }
 
+void redrawCurrentDisplayPage();
+
 void handleWebDisplaySettingsPost() {
   const String color_order = web_server.arg("color_order");
+  const String flip180_value = web_server.arg("flip180");
+  const String rotate90_value = web_server.arg("rotate90");
+  const String theme_value = web_server.arg("theme");
+  DisplayTheme theme = DisplayTheme::kDefault;
   if (color_order != "rgb" && color_order != "bgr") {
     sendWebMessage(400, false, "Color order must be 'rgb' or 'bgr'.");
     return;
   }
+  if ((flip180_value != "0" && flip180_value != "1") ||
+      (rotate90_value != "0" && rotate90_value != "1")) {
+    sendWebMessage(400, false, "Invalid display orientation setting.");
+    return;
+  }
+  if (!displayThemeFromString(theme_value, theme)) {
+    sendWebMessage(400, false, "Invalid display theme.");
+    return;
+  }
 
   const bool rgb_order = color_order == "rgb";
-  display.setColorOrderRgb(rgb_order);
+  const bool flip180 = flip180_value == "1";
+  const bool rotate90 = rotate90_value == "1";
+  display.applyDisplaySettings(rgb_order, flip180, rotate90);
+  applyDisplayTheme(theme);
   preferences.putUChar("color_order", rgb_order ? 1 : 0);
+  preferences.putUChar("flip180", flip180 ? 1 : 0);
+  preferences.putUChar("rotate90", rotate90 ? 1 : 0);
+  preferences.putUChar("device_theme", static_cast<uint8_t>(theme));
+  // Changing MADCTL remaps how the existing GRAM contents are scanned out,
+  // and a theme change needs every previously-drawn pixel repainted in the
+  // new colours - either way the screen looks wrong until it's redrawn.
+  redrawCurrentDisplayPage();
   sendWebMessage(200, true, "Display setting saved.");
 }
 
@@ -2429,6 +2625,12 @@ void drawDateTime() {
   canvas.setFont(&fonts::Font0);
   canvas.setTextColor(kMuted);
   canvas.drawString(date_time, 310, 15);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    const int32_t date_time_width = canvas.textWidth(date_time);
+    canvas.drawString(WiFi.localIP().toString().c_str(),
+                      310 - date_time_width - 14, 15);
+  }
 }
 
 void drawMainMetricValue() {
@@ -2810,6 +3012,25 @@ void drawCalibrationScreen() {
   display.endWrite();
 }
 
+// Fully redraws whichever physical-display page is currently shown. Used
+// after a display setting change (colour order, flip, rotate) rewrites
+// MADCTL, which leaves the previously-drawn screen looking garbled until
+// every pixel is redrawn under the new orientation.
+void redrawCurrentDisplayPage() {
+  switch (display_page) {
+    case DisplayPage::kDashboard:
+      drawStaticDashboard();
+      drawDynamicValues();
+      break;
+    case DisplayPage::kLongTerm:
+      drawLongTermScreen();
+      break;
+    case DisplayPage::kCalibration:
+      drawCalibrationScreen();
+      break;
+  }
+}
+
 void finishCalibrationAction(bool ok, const char* success_message) {
   last_reading_ms = millis();
   resetStabilizationWindows();
@@ -2973,6 +3194,15 @@ void handleTouch() {
   uint16_t y = 0;
   const bool touch_is_down = display.getTouch(&x, &y);
 
+  // The touch panel is separate hardware calibrated for the native display
+  // orientation, so it doesn't follow display.applyDisplaySettings()'s raw
+  // MADCTL writes. Mirror the point to match what flip180 now shows on
+  // screen. (Not corrected for rotate90 - see applyDisplaySettings().)
+  if (touch_is_down && display.flip180()) {
+    x = display.width() - 1 - x;
+    y = display.height() - 1 - y;
+  }
+
   if (touch_is_down) {
     if (!touch_was_down) {
       touch_start_x = x;
@@ -3063,11 +3293,17 @@ void setup() {
   if (saved_metric < static_cast<uint8_t>(DisplayMetric::kCount)) {
     display_metric = static_cast<DisplayMetric>(saved_metric);
   }
-  display.setColorOrderRgb(preferences.getUChar("color_order", 0) != 0);
+  display.applyDisplaySettings(preferences.getUChar("color_order", 0) != 0,
+                               preferences.getUChar("flip180", 0) != 0,
+                               preferences.getUChar("rotate90", 0) != 0);
   const uint8_t saved_sensor_type = preferences.getUChar("sensor_type", 0);
   if (saved_sensor_type <= static_cast<uint8_t>(SensorType::kScd30)) {
     configured_sensor_type = static_cast<SensorType>(saved_sensor_type);
   }
+  const uint8_t saved_theme = preferences.getUChar("device_theme", 0);
+  applyDisplayTheme(saved_theme < static_cast<uint8_t>(DisplayTheme::kCount)
+                        ? static_cast<DisplayTheme>(saved_theme)
+                        : DisplayTheme::kDefault);
   loadHistory();
   display.startWrite();
   drawStaticDashboard();
@@ -3092,8 +3328,11 @@ void loop() {
     struct tm local_time = {};
     const int current_minute =
         getLocalTime(&local_time, 0) ? local_time.tm_min : -1;
-    if (current_minute != last_clock_minute) {
+    const bool wifi_connected_now = WiFi.status() == WL_CONNECTED;
+    if (current_minute != last_clock_minute ||
+        wifi_connected_now != last_top_bar_wifi_connected) {
       last_clock_minute = current_minute;
+      last_top_bar_wifi_connected = wifi_connected_now;
       display.startWrite();
       drawDateTime();
       display.endWrite();

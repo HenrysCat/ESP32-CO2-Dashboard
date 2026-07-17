@@ -1,7 +1,7 @@
 # ESP32-2432S028R CO2 Dashboard
 
 Full-colour indoor air-quality display for the **ESP32-2432S028R**
-("Cheap Yellow Display") and a **Sensirion SCD40 or SCD41** sensor.
+("Cheap Yellow Display") and a **Sensirion SCD40, SCD41, or SCD30** sensor.
 
 <img width="1600" height="1028" alt="Photo" src="https://github.com/HenrysCat/ESP32-CO2-Dashboard/blob/main/Web%20UI%20Screenshots/CO2.jpg" />
 
@@ -14,6 +14,8 @@ Full-colour indoor air-quality display for the **ESP32-2432S028R**
 - Green: below 800 ppm
 - Amber: 800-1199 ppm
 - Red: 1200 ppm and above
+- The date/time in the top-right corner is joined by the device's Wi-Fi IP
+  address whenever it's connected, and left blank otherwise
 
 The display is configured for the ESP32-2432S028R's built-in 2.8-inch
 320x240 ILI9341 panel and XPT2046 touch controller. No separate display or
@@ -47,7 +49,8 @@ required tail of the active monthly CSV and condenses it to the screen width,
 so its RAM usage does not grow with the size of the log file.
 
 Hold the **BOOT** button for about one second while viewing the long-term
-screen to open **SCD40 CALIBRATION**.
+screen to open the calibration screen, titled for whichever sensor is active
+(for example **SCD4x CALIBRATION** or **SCD30 CALIBRATION**).
 This screen provides:
 
 - Automatic self-calibration on/off
@@ -193,10 +196,32 @@ memory use fixed even as files grow.
 Monthly charts show sparse date/time grid lines from the first reading to the
 latest reading in the selected file.
 
-A gear button at the top of the page opens sensor settings for automatic
-self-calibration, temperature offset, and guarded forced recalibration.
-Changing a sensor setting briefly pauses measurements while the value is
-written and persisted by the SCD40/SCD41.
+A gear button at the top of the page opens a **CO2 sensor** selector -
+Auto-detect, SCD4x (SCD40/SCD41), or SCD30 - alongside sensor settings for
+automatic self-calibration, temperature offset, and guarded forced
+recalibration. Auto-detect uses whichever sensor answers on the I2C bus at
+startup. Changing a sensor setting briefly pauses measurements while the
+value is written and persisted by the active sensor.
+
+### Display settings
+
+The same settings panel also has a display section:
+
+- **Dashboard colour theme** - Midnight blue, Black/red, Slate green, or
+  Violet dusk. This only restyles this web page and is saved per browser, so
+  different visitors can each pick their own without affecting anyone else.
+- **Device colour theme** - Default, Midnight blue, Black/red, Slate green,
+  Violet dusk, or Mauve. Restyles the physical CYD screen and is saved on the
+  device.
+- **Screen colour order** (BGR/RGB) - corrects red and blue appearing swapped
+  on differently-wired panels.
+- **Rotate display 90 degrees** - corrects panels that boot into a cropped
+  portrait image because of a differently wired panel variant.
+- **Flip display 180 degrees** - for mounting the board with the cable exit
+  on either side.
+
+Changing a device display setting fully redraws the physical screen so it
+doesn't stay garbled after the colours change.
 
 The `.local` address requires mDNS support, which is built into current
 Windows, macOS, iOS, and most Linux and Android installations. Use the printed
@@ -204,30 +229,33 @@ IP address if the hostname is not resolved by a particular device.
 
 ## Sensor wiring
 
-| SCD40/SCD41 | ESP32-2432S028R |
-|-------------|-----------------|
-| VIN         | 3V3             |
-| GND         | GND             |
-| SDA         | GPIO 27         |
-| SCL         | GPIO 22         |
+| SCD4x (SCD40/SCD41) or SCD30 | ESP32-2432S028R |
+|-------------------------------|-----------------|
+| VIN                           | 3V3             |
+| GND                           | GND             |
+| SDA                           | GPIO 27         |
+| SCL                           | GPIO 22         |
 
-Use a breakout board that includes the required I2C pull-up resistors. The
-pins can be changed at the top of `src/main.cpp` if your board exposes a
-different connector.
+Both sensor families share the same I2C wiring; the firmware tells them apart
+by I2C address, either automatically or via the **CO2 sensor** selector in the
+web dashboard's settings. Use a breakout board that includes the required I2C
+pull-up resistors. The pins can be changed at the top of `src/main.cpp` if
+your board exposes a different connector.
 
 ### Sensor power
 
 On the tested board, powering the CYD through its **Micro-USB port** provides
-stable operation with the SCD40/SCD41 connected to the onboard 3.3 V pin.
-Powering the same board through its **USB-C port** caused the LCD backlight to
-flicker during sensor measurements. This is likely due to additional voltage
-drop in that input path, the USB cable, or the connector.
+stable operation with the sensor connected to the onboard 3.3 V pin. Powering
+the same board through its **USB-C port** caused the LCD backlight to flicker
+during sensor measurements. This is likely due to additional voltage drop in
+that input path, the USB cable, or the connector.
 
 Prefer Micro-USB for normal operation and do not power both USB ports at the
 same time.
 
-The sensor can draw approximately 205 mA in short measurement pulses. If the
-backlight still flickers:
+The SCD4x can draw approximately 205 mA in short measurement pulses; the
+SCD30's power draw was not separately measured, but the same precautions
+apply. If the backlight still flickers:
 
 - Try a shorter, higher-quality Micro-USB cable and a reliable 5 V supply.
 - Add a 470 uF electrolytic capacitor and a 100 nF ceramic capacitor directly
