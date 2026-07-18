@@ -17,6 +17,9 @@
 namespace config {
 
 constexpr int kBacklightPin = 21;
+constexpr int kBacklightPwmChannel = 0;
+constexpr int kBacklightPwmFreqHz = 5000;
+constexpr int kBacklightPwmResolutionBits = 8;
 constexpr int kBootButtonPin = 0;
 constexpr int kI2cSdaPin = 27;
 constexpr int kI2cSclPin = 22;
@@ -552,6 +555,16 @@ CydDisplay& canvas = display;
 std::unique_ptr<Co2Sensor> sensor;
 SensorType configured_sensor_type = SensorType::kAuto;
 Preferences preferences;
+uint8_t backlight_brightness = 100;  // Percent, clamped to [10, 100].
+
+// The backlight is PWM-driven via LEDC rather than the ILI9341 itself, so
+// this is independent of applyDisplaySettings(). 10% is the floor so the
+// screen never goes fully dark and unreadable from a bad web request.
+void applyBacklightBrightness(uint8_t percent) {
+  backlight_brightness = constrain(percent, 10, 100);
+  const uint32_t max_duty = (1u << config::kBacklightPwmResolutionBits) - 1;
+  ledcWrite(config::kBacklightPwmChannel, backlight_brightness * max_duty / 100);
+}
 WiFiManager wifi_manager;
 WebServer web_server(80);
 SoftSpiDriver<config::kSdMisoPin, config::kSdMosiPin, config::kSdSckPin>
@@ -1380,6 +1393,7 @@ label{color:var(--text);font-weight:650}
 .help{color:var(--muted);font-size:.82rem}
 input[type=number],select{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--text);padding:11px 12px;font:inherit}
 input[type=checkbox]{width:42px;height:22px;accent-color:var(--green)}
+input[type=range]{width:100%;accent-color:var(--green)}
 .primary{width:100%;border-color:var(--accent);color:var(--accent);padding:11px 16px;border-radius:10px;font-weight:700}
 .danger-zone{border-top:1px solid var(--line);margin-top:24px;padding-top:20px}
 .danger{width:100%;border-color:var(--red);color:var(--red);padding:11px 16px;border-radius:10px;font-weight:700}
@@ -1432,6 +1446,7 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <form id="display-settings-form">
 <div class="field"><label for="device-theme">Device colour theme</label><select id="device-theme"><option value="default">Default</option><option value="midnight-blue">Midnight blue</option><option value="black-red">Black / red</option><option value="slate-green">Slate green</option><option value="violet-dusk">Violet dusk</option><option value="mauve">Mauve</option></select><div class="help">Changes the colour of the physical screen on the device itself.</div></div>
 <div class="field"><label for="color-order">Screen colour order</label><select id="color-order"><option value="bgr">BGR</option><option value="rgb">RGB</option></select><div class="help">If red and blue appear swapped on screen, switch this to match your panel's wiring.</div></div>
+<div class="field"><label for="brightness">Screen brightness (<span id="brightness-value">100</span>%)</label><input id="brightness" type="range" min="10" max="100" step="5"><div class="help">Adjusts the physical screen's backlight brightness.</div></div>
 <div class="field field-row"><div><label for="rotate90">Rotate display 90&deg;</label><div class="help">Enable this if the screen shows portrait and cropped on first start.</div></div><input id="rotate90" type="checkbox"></div>
 <div class="field field-row"><div><label for="flip180">Flip display 180&deg;</label><div class="help">Enable this if the screen is mounted upside down.</div></div><input id="flip180" type="checkbox"></div>
 <button class="primary" id="display-settings-save" type="submit">Save display setting</button>
@@ -1507,7 +1522,7 @@ async function openSettings(){
  $("settings").classList.add("open");$("settings-message").textContent="Reading sensor settings...";
  try{const d=await getJson("/api/settings");$("asc").checked=d.asc;$("offset").value=d.temperature_offset.toFixed(1);$("reference").value=String(d.reference);$("settings-message").textContent=d.sensor_ready?"":"Sensor is not ready."}
  catch(e){$("settings-message").textContent="Could not read sensor settings."}
- try{const d=await getJson("/api/display-settings");$("color-order").value=d.color_order;$("rotate90").checked=d.rotate90;$("flip180").checked=d.flip180;$("device-theme").value=d.theme}
+ try{const d=await getJson("/api/display-settings");$("color-order").value=d.color_order;$("rotate90").checked=d.rotate90;$("flip180").checked=d.flip180;$("brightness").value=d.brightness;$("brightness-value").textContent=d.brightness;$("device-theme").value=d.theme}
  catch(e){}
  await getSensorType();
 }
@@ -1539,7 +1554,8 @@ document.querySelectorAll("[data-live-metric]").forEach(card=>card.addEventListe
 document.querySelectorAll("button[data-month-metric]").forEach(b=>b.addEventListener("click",()=>{monthlyMetric=b.dataset.monthMetric;document.querySelectorAll("button[data-month-metric]").forEach(x=>x.classList.toggle("active",x===b));drawMonthly()}));$("month").addEventListener("change",e=>loadMonth(e.target.value));
 $("settings-open").addEventListener("click",openSettings);$("settings-close").addEventListener("click",closeSettings);$("settings").addEventListener("click",e=>{if(e.target===$("settings"))closeSettings()});
 $("settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("settings-save");button.disabled=true;$("settings-message").textContent="Saving settings...";try{const d=await postSettings({action:"save",asc:$("asc").checked?"1":"0",offset:$("offset").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
-$("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value,rotate90:$("rotate90").checked?"1":"0",flip180:$("flip180").checked?"1":"0",theme:$("device-theme").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
+$("brightness").addEventListener("input",()=>{$("brightness-value").textContent=$("brightness").value});
+$("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value,rotate90:$("rotate90").checked?"1":"0",flip180:$("flip180").checked?"1":"0",brightness:$("brightness").value,theme:$("device-theme").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("sensor-type-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("sensor-type-save");button.disabled=true;$("settings-message").textContent="Saving sensor type...";try{const d=await postSensorType({sensor_type:$("sensor-type").value});$("settings-message").textContent=d.message;await getSensorType()}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("frc").addEventListener("click",async()=>{const reference=$("reference").value;if(!confirm(`Run forced recalibration at ${reference} ppm? The sensor must have been in stable reference air for at least three minutes.`))return;const button=$("frc");button.disabled=true;$("settings-message").textContent="Recalibrating sensor...";try{const d=await postSettings({action:"frc",reference});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 addEventListener("keydown",e=>{if(e.key==="Escape")closeSettings()});
@@ -2045,13 +2061,15 @@ void handleWebSettingsPost() {
 
 void handleWebDisplaySettingsGet() {
   String json;
-  json.reserve(128);
+  json.reserve(160);
   json = F("{\"color_order\":\"");
   json += display.colorOrderRgb() ? F("rgb") : F("bgr");
   json += F("\",\"flip180\":");
   json += display.flip180() ? F("true") : F("false");
   json += F(",\"rotate90\":");
   json += display.rotate90() ? F("true") : F("false");
+  json += F(",\"brightness\":");
+  json += String(backlight_brightness);
   json += F(",\"theme\":\"");
   json += displayThemeToString(display_theme);
   json += F("\"}");
@@ -2065,6 +2083,7 @@ void handleWebDisplaySettingsPost() {
   const String color_order = web_server.arg("color_order");
   const String flip180_value = web_server.arg("flip180");
   const String rotate90_value = web_server.arg("rotate90");
+  const String brightness_value = web_server.arg("brightness");
   const String theme_value = web_server.arg("theme");
   DisplayTheme theme = DisplayTheme::kDefault;
   if (color_order != "rgb" && color_order != "bgr") {
@@ -2074,6 +2093,11 @@ void handleWebDisplaySettingsPost() {
   if ((flip180_value != "0" && flip180_value != "1") ||
       (rotate90_value != "0" && rotate90_value != "1")) {
     sendWebMessage(400, false, "Invalid display orientation setting.");
+    return;
+  }
+  const int brightness = brightness_value.toInt();
+  if (brightness < 10 || brightness > 100) {
+    sendWebMessage(400, false, "Brightness must be between 10 and 100.");
     return;
   }
   if (!displayThemeFromString(theme_value, theme)) {
@@ -2086,10 +2110,12 @@ void handleWebDisplaySettingsPost() {
   const bool rotate90 = rotate90_value == "1";
   display.applyDisplaySettings(rgb_order, flip180, rotate90);
   applyDisplayTheme(theme);
+  applyBacklightBrightness(static_cast<uint8_t>(brightness));
   preferences.putUChar("color_order", rgb_order ? 1 : 0);
   preferences.putUChar("flip180", flip180 ? 1 : 0);
   preferences.putUChar("rotate90", rotate90 ? 1 : 0);
   preferences.putUChar("device_theme", static_cast<uint8_t>(theme));
+  preferences.putUChar("brightness", backlight_brightness);
   // Changing MADCTL remaps how the existing GRAM contents are scanned out,
   // and a theme change needs every previously-drawn pixel repainted in the
   // new colours - either way the screen looks wrong until it's redrawn.
@@ -3274,9 +3300,11 @@ void setup() {
 
   const bool display_ok = display.init();
   display.setRotation(0);
-  pinMode(config::kBacklightPin, OUTPUT);
   pinMode(config::kBootButtonPin, INPUT_PULLUP);
-  digitalWrite(config::kBacklightPin, HIGH);
+  ledcSetup(config::kBacklightPwmChannel, config::kBacklightPwmFreqHz,
+            config::kBacklightPwmResolutionBits);
+  ledcAttachPin(config::kBacklightPin, config::kBacklightPwmChannel);
+  applyBacklightBrightness(100);  // Full brightness until the saved value loads below.
   Serial.printf("Display init: %s, size: %d x %d\n",
                 display_ok ? "OK" : "FAILED", display.width(), display.height());
   display.setColorDepth(16);
@@ -3296,6 +3324,7 @@ void setup() {
   display.applyDisplaySettings(preferences.getUChar("color_order", 0) != 0,
                                preferences.getUChar("flip180", 0) != 0,
                                preferences.getUChar("rotate90", 0) != 0);
+  applyBacklightBrightness(preferences.getUChar("brightness", 100));
   const uint8_t saved_sensor_type = preferences.getUChar("sensor_type", 0);
   if (saved_sensor_type <= static_cast<uint8_t>(SensorType::kScd30)) {
     configured_sensor_type = static_cast<SensorType>(saved_sensor_type);
@@ -3317,7 +3346,6 @@ void setup() {
 }
 
 void loop() {
-  digitalWrite(config::kBacklightPin, HIGH);
   serviceWifiAndTime();
   serviceWebDashboard();
   handleTouch();
