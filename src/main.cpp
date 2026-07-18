@@ -552,6 +552,36 @@ enum class SensorType : uint8_t {
 
 CydDisplay display;
 CydDisplay& canvas = display;
+
+// Off-screen buffer for redrawing the dashboard's dynamic regions without
+// flicker: each region is rendered here and pushed to the panel in a single
+// blit, so the display never shows the cleared background between erase and
+// redraw. One static buffer is shared by every region (sized for the
+// largest, the trend graph plot) to avoid heap churn on every reading.
+constexpr int kRegionMaxPixels = 150 * 88;
+uint16_t region_pixels[kRegionMaxPixels];
+lgfx::LGFX_Sprite region_sprite(&display);
+int region_x = 0;
+int region_y = 0;
+
+// Points the shared sprite at a w-by-h region whose top-left corner sits at
+// (x, y) on the panel, cleared to `fill`. Drawing then uses coordinates
+// relative to the region's corner; endRegion() blits the result out.
+bool beginRegion(int x, int y, int w, int h, uint32_t fill) {
+  if (w * h > kRegionMaxPixels) return false;
+  region_sprite.setBuffer(region_pixels, w, h, 16);
+  region_x = x;
+  region_y = y;
+  region_sprite.fillSprite(fill);
+  return true;
+}
+
+void endRegion() {
+  region_sprite.pushSprite(region_x, region_y);
+  // pushSprite streams the buffer by DMA and can return before the transfer
+  // completes; wait so the next region can't overwrite pixels mid-flight.
+  display.waitDMA();
+}
 std::unique_ptr<Co2Sensor> sensor;
 SensorType configured_sensor_type = SensorType::kAuto;
 Preferences preferences;
@@ -2640,43 +2670,45 @@ void drawStaticDashboard() {
 }
 
 void drawDateTime() {
-  canvas.fillRect(105, 5, 207, 20, kBackground);
+  if (!beginRegion(105, 5, 207, 20, kBackground)) return;
   char date_time[20] = "--/--/-- --:--";
   struct tm local_time = {};
   if (getLocalTime(&local_time, 0)) {
     strftime(date_time, sizeof(date_time), "%d/%m/%y %H:%M",
              &local_time);
   }
-  canvas.setTextDatum(textdatum_t::middle_right);
-  canvas.setFont(&fonts::Font0);
-  canvas.setTextColor(kMuted);
-  canvas.drawString(date_time, 310, 15);
+  region_sprite.setTextDatum(textdatum_t::middle_right);
+  region_sprite.setFont(&fonts::Font0);
+  region_sprite.setTextColor(kMuted);
+  region_sprite.drawString(date_time, 205, 10);
 
   if (WiFi.status() == WL_CONNECTED) {
-    const int32_t date_time_width = canvas.textWidth(date_time);
-    canvas.drawString(WiFi.localIP().toString().c_str(),
-                      310 - date_time_width - 14, 15);
+    const int32_t date_time_width = region_sprite.textWidth(date_time);
+    region_sprite.drawString(WiFi.localIP().toString().c_str(),
+                             205 - date_time_width - 14, 10);
   }
+  endRegion();
 }
 
 void drawMainMetricValue() {
-  canvas.fillRect(14, 62, 114, 96, kPanel);
+  if (!beginRegion(14, 62, 114, 96, kPanel)) return;
 
   if (!metricReady(display_metric)) {
-    canvas.setTextDatum(textdatum_t::middle_center);
-    canvas.setFont(&fonts::Font4);
-    canvas.setTextColor(kAmber);
-    canvas.drawString("...", 71, 91);
-    canvas.setFont(&fonts::Font0);
-    canvas.setTextColor(kMuted);
-    canvas.drawString(display_metric == DisplayMetric::kCo2
-                          ? "CO2 stabilizing"
-                          : "Sensor stabilizing",
-                      71, 126);
-    canvas.drawString(display_metric == DisplayMetric::kCo2
-                          ? "about 30 seconds"
-                          : "about 3 minutes",
-                      71, 140);
+    region_sprite.setTextDatum(textdatum_t::middle_center);
+    region_sprite.setFont(&fonts::Font4);
+    region_sprite.setTextColor(kAmber);
+    region_sprite.drawString("...", 57, 29);
+    region_sprite.setFont(&fonts::Font0);
+    region_sprite.setTextColor(kMuted);
+    region_sprite.drawString(display_metric == DisplayMetric::kCo2
+                                 ? "CO2 stabilizing"
+                                 : "Sensor stabilizing",
+                             57, 64);
+    region_sprite.drawString(display_metric == DisplayMetric::kCo2
+                                 ? "about 30 seconds"
+                                 : "about 3 minutes",
+                             57, 78);
+    endRegion();
     return;
   }
 
@@ -2684,31 +2716,33 @@ void drawMainMetricValue() {
   const uint32_t color = metricColor(display_metric, value);
   char value_text[12] = {};
   formatMetricValue(display_metric, value, value_text, sizeof(value_text));
-  canvas.setTextDatum(textdatum_t::middle_center);
-  canvas.setFont(&fonts::Font7);
-  canvas.setTextColor(color);
-  canvas.drawString(value_text, 71, 88);
-  canvas.setFont(&fonts::Font2);
-  canvas.setTextColor(kMuted);
-  canvas.drawString(metricUnit(display_metric), 71, 125);
+  region_sprite.setTextDatum(textdatum_t::middle_center);
+  region_sprite.setFont(&fonts::Font7);
+  region_sprite.setTextColor(color);
+  region_sprite.drawString(value_text, 57, 26);
+  region_sprite.setFont(&fonts::Font2);
+  region_sprite.setTextColor(kMuted);
+  region_sprite.drawString(metricUnit(display_metric), 57, 63);
 
-  canvas.fillRoundRect(18, 142, 106, 15, 7, color);
-  canvas.setFont(&fonts::Font0);
-  canvas.setTextColor(kBackground);
-  canvas.drawString(display_metric == DisplayMetric::kCo2
-                        ? qualityLabel(current.co2)
-                        : display_metric == DisplayMetric::kTemperature
-                              ? "TEMPERATURE"
-                              : "HUMIDITY",
-                    71, 149);
+  region_sprite.fillRoundRect(4, 80, 106, 15, 7, color);
+  region_sprite.setFont(&fonts::Font0);
+  region_sprite.setTextColor(kBackground);
+  region_sprite.drawString(display_metric == DisplayMetric::kCo2
+                               ? qualityLabel(current.co2)
+                               : display_metric == DisplayMetric::kTemperature
+                                     ? "TEMPERATURE"
+                                     : "HUMIDITY",
+                           57, 87);
+  endRegion();
 }
 
 void drawTrendRange() {
-  canvas.fillRect(254, 39, 50, 18, kPanel);
-  canvas.setTextDatum(textdatum_t::top_right);
-  canvas.setFont(&fonts::Font0);
-  canvas.setTextColor(kMuted);
-  canvas.drawString(trendRangeLabel(), 302, 45);
+  if (!beginRegion(254, 39, 50, 18, kPanel)) return;
+  region_sprite.setTextDatum(textdatum_t::top_right);
+  region_sprite.setFont(&fonts::Font0);
+  region_sprite.setTextColor(kMuted);
+  region_sprite.drawString(trendRangeLabel(), 48, 6);
+  endRegion();
 }
 
 void drawGraphPlot() {
@@ -2721,10 +2755,9 @@ void drawGraphPlot() {
   constexpr int gy = y + 35;
   constexpr int gw = w - 20;
   constexpr int gh = h - 46;
-  canvas.fillRect(gx, gy, gw, gh + 1, kPanel);
+  if (!beginRegion(gx, gy, gw, gh + 1, kPanel)) return;
   for (int i = 0; i <= 3; ++i) {
-    const int line_y = gy + i * gh / 3;
-    canvas.drawFastHLine(gx, line_y, gw, kPanelLight);
+    region_sprite.drawFastHLine(0, i * gh / 3, gw, kPanelLight);
   }
 
   const bool short_range = trend_range == TrendRange::kTenMinutes;
@@ -2740,10 +2773,11 @@ void drawGraphPlot() {
   const size_t source_start = available_count - source_count;
 
   if (source_count < 2) {
-    canvas.setTextDatum(textdatum_t::middle_center);
-    canvas.setFont(&fonts::Font0);
-    canvas.setTextColor(kMuted);
-    canvas.drawString("Collecting history", x + w / 2, gy + gh / 2);
+    region_sprite.setTextDatum(textdatum_t::middle_center);
+    region_sprite.setFont(&fonts::Font0);
+    region_sprite.setTextColor(kMuted);
+    region_sprite.drawString("Collecting history", gw / 2, gh / 2);
+    endRegion();
     return;
   }
 
@@ -2772,10 +2806,11 @@ void drawGraphPlot() {
     ++valid_count;
   }
   if (valid_count < 2) {
-    canvas.setTextDatum(textdatum_t::middle_center);
-    canvas.setFont(&fonts::Font0);
-    canvas.setTextColor(kMuted);
-    canvas.drawString("Collecting history", x + w / 2, gy + gh / 2);
+    region_sprite.setTextDatum(textdatum_t::middle_center);
+    region_sprite.setFont(&fonts::Font0);
+    region_sprite.setTextColor(kMuted);
+    region_sprite.drawString("Collecting history", gw / 2, gh / 2);
+    endRegion();
     return;
   }
   if (display_metric == DisplayMetric::kCo2) {
@@ -2800,33 +2835,38 @@ void drawGraphPlot() {
       continue;
     }
     const int px =
-        gx + static_cast<int>((missing_count + i) * (gw - 1) /
-                              (expected_count - 1));
-    const int py = gy + gh -
+        static_cast<int>((missing_count + i) * (gw - 1) /
+                         (expected_count - 1));
+    const int py = gh -
                    static_cast<int>((value - min_value) * gh /
                                     (max_value - min_value));
     if (have_previous) {
-      canvas.drawLine(previous_x, previous_y, px, py,
-                      metricColor(display_metric, value));
+      region_sprite.drawLine(previous_x, previous_y, px, py,
+                             metricColor(display_metric, value));
     }
     previous_x = px;
     previous_y = py;
     have_previous = true;
   }
+  endRegion();
 }
 
 void drawMetricValue(int x, const char* value, const char* unit,
                      uint32_t accent) {
+  // The accent bar is a single solid fill (no erase step), so it can be
+  // drawn direct without flicker; the sprite region stops above the static
+  // metric title drawn by drawStaticDashboard.
   canvas.fillRoundRect(x + 9, 182, 4, 38, 2, accent);
-  canvas.fillRect(x + 18, 196, 122, 28, kPanel);
-  canvas.setTextDatum(textdatum_t::top_left);
-  canvas.setFont(&fonts::Font4);
-  canvas.setTextColor(kWhite);
-  canvas.drawString(value, x + 21, 197);
-  const int value_width = canvas.textWidth(value);
-  canvas.setFont(&fonts::Font2);
-  canvas.setTextColor(accent);
-  canvas.drawString(unit, x + 24 + value_width, 204);
+  if (!beginRegion(x + 18, 196, 122, 28, kPanel)) return;
+  region_sprite.setTextDatum(textdatum_t::top_left);
+  region_sprite.setFont(&fonts::Font4);
+  region_sprite.setTextColor(kWhite);
+  region_sprite.drawString(value, 3, 1);
+  const int value_width = region_sprite.textWidth(value);
+  region_sprite.setFont(&fonts::Font2);
+  region_sprite.setTextColor(accent);
+  region_sprite.drawString(unit, 6 + value_width, 8);
+  endRegion();
 }
 
 void drawDynamicValues() {
