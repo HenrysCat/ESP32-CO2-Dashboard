@@ -210,9 +210,9 @@ The same settings panel also has a display section:
 - **Dashboard colour theme** - Midnight blue, Black/red, Slate green, or
   Violet dusk. This only restyles this web page and is saved per browser, so
   different visitors can each pick their own without affecting anyone else.
-- **Device colour theme** - Default, Midnight blue, Black/red, Slate green,
-  Violet dusk, or Mauve. Restyles the physical CYD screen and is saved on the
-  device.
+- **Device colour theme** - Navy, Midnight Blue, Slate Green, Violet Dusk,
+  Mahogany, Carbon Red, Black Red, or Mauve. Restyles the physical CYD
+  screen and is saved on the device.
 - **Screen colour order** (BGR/RGB) - corrects red and blue appearing swapped
   on differently-wired panels.
 - **Rotate display 90 degrees** - corrects panels that boot into a cropped

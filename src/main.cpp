@@ -731,11 +731,13 @@ constexpr uint32_t kHistoryMagic = 0x434F3248;
 constexpr uint16_t kHistoryVersion = 1;
 
 enum class DisplayTheme : uint8_t {
-  kDefault = 0,
-  kBlackRed,
+  kNavy = 0,
+  kMidnightBlue,
   kSlateGreen,
   kVioletDusk,
-  kMidnightBlue,
+  kMahogany,
+  kCarbonRed,
+  kBlackRed,
   kMauve,
   kCount,
 };
@@ -755,27 +757,21 @@ struct DisplayPalette {
 // fixed across every theme so they keep meaning "good/warn/bad air", not
 // just decoration.
 //
-// kDefault/kSlateGreen/kVioletDusk render correctly as authored on real
-// hardware with the "Screen colour order" display setting on BGR (this
-// board's correct setting - confirmed since those three all look right).
-// kBlackRed and kMidnightBlue, tuned the same way, instead came out with
-// red and blue visibly swapped once BGR is the active order (kBlackRed
-// read as blue, kMidnightBlue as purple) - but looked right when that
-// display setting was switched to RGB. Rather than requiring the whole
-// device to run in RGB (which would break the other three themes), their
-// R and B bytes are pre-swapped here ("BBGGRR" instead of "RRGGBB") so
-// that, once BGR swaps them back on the way to the panel, they land on
-// the same colours that looked right under RGB. kMauve is built the same
-// way from kVioletDusk, matching the "mauve" look seen when Violet dusk
-// was tried under RGB. kBlackRed's panel/panel_light were further pushed
-// to a pure red (no green component) after the swap-compensated version
-// still rendered as brown.
+// These colours were tuned by eye on real hardware with the "Screen colour
+// order" display setting on RGB (this board's correct setting - confirmed
+// by testing every theme, not just one or two). kSlateGreen is the one
+// exception: authored directly it reads as teal/blue rather than green
+// under RGB order, so its R and B bytes are intentionally pre-swapped to
+// land on the intended green - don't "simplify" that one row without
+// re-checking on the device.
 constexpr DisplayPalette kDisplayPalettes[] = {
-    {0x07111F, 0x0E2034, 0x15304B, 0xF4F7FB, 0x7794AC},  // Default
-    {0x000000, 0x000030, 0x000068, 0xE6ECF7, 0x6078AD},  // Black/red
-    {0x050F0C, 0x0A1E18, 0x173A2E, 0xEAF7F0, 0x7FAE95},  // Slate green
-    {0x0D0714, 0x1A0E2A, 0x3A2050, 0xF3ECFA, 0xA48FC0},  // Violet dusk
-    {0x180808, 0x40140E, 0x602018, 0xFAF2F0, 0xC09088},  // Midnight blue
+    {0x07111F, 0x0E2034, 0x15304B, 0xF4F7FB, 0x7794AC},  // Navy
+    {0x000000, 0x000030, 0x000068, 0xE6ECF7, 0x6078AD},  // Midnight Blue
+    {0x0C0F05, 0x181E0A, 0x2E3A17, 0xF0F7EA, 0x95AE7F},  // Slate Green
+    {0x0D0714, 0x1A0E2A, 0x3A2050, 0xF3ECFA, 0xA48FC0},  // Violet Dusk
+    {0x180808, 0x40140E, 0x602018, 0xFAF2F0, 0xC09088},  // Mahogany
+    {0x050505, 0x180808, 0x350F12, 0xF8EEEE, 0xD06060},  // Carbon Red
+    {0x000000, 0x180000, 0x500000, 0xFFFFFF, 0xFF3030},  // Black Red
     {0x14070D, 0x2A0E1A, 0x50203A, 0xFAECF3, 0xC08FA4},  // Mauve
 };
 
@@ -792,7 +788,7 @@ constexpr uint32_t kAmber = 0xFFB547;
 constexpr uint32_t kRed = 0xFF5D73;
 constexpr uint32_t kBlue = 0x50B8FF;
 
-DisplayTheme display_theme = DisplayTheme::kDefault;
+DisplayTheme display_theme = DisplayTheme::kNavy;
 
 void applyDisplayTheme(DisplayTheme theme) {
   const DisplayPalette& palette =
@@ -807,32 +803,40 @@ void applyDisplayTheme(DisplayTheme theme) {
 
 const char* displayThemeToString(DisplayTheme theme) {
   switch (theme) {
-    case DisplayTheme::kBlackRed:
-      return "black-red";
+    case DisplayTheme::kMidnightBlue:
+      return "midnight-blue";
     case DisplayTheme::kSlateGreen:
       return "slate-green";
     case DisplayTheme::kVioletDusk:
       return "violet-dusk";
-    case DisplayTheme::kMidnightBlue:
-      return "midnight-blue";
+    case DisplayTheme::kMahogany:
+      return "mahogany";
+    case DisplayTheme::kCarbonRed:
+      return "carbon-red";
+    case DisplayTheme::kBlackRed:
+      return "black-red";
     case DisplayTheme::kMauve:
       return "mauve";
     default:
-      return "default";
+      return "navy";
   }
 }
 
 bool displayThemeFromString(const String& value, DisplayTheme& theme) {
-  if (value == "default") {
-    theme = DisplayTheme::kDefault;
-  } else if (value == "black-red") {
-    theme = DisplayTheme::kBlackRed;
+  if (value == "navy") {
+    theme = DisplayTheme::kNavy;
+  } else if (value == "midnight-blue") {
+    theme = DisplayTheme::kMidnightBlue;
   } else if (value == "slate-green") {
     theme = DisplayTheme::kSlateGreen;
   } else if (value == "violet-dusk") {
     theme = DisplayTheme::kVioletDusk;
-  } else if (value == "midnight-blue") {
-    theme = DisplayTheme::kMidnightBlue;
+  } else if (value == "mahogany") {
+    theme = DisplayTheme::kMahogany;
+  } else if (value == "carbon-red") {
+    theme = DisplayTheme::kCarbonRed;
+  } else if (value == "black-red") {
+    theme = DisplayTheme::kBlackRed;
   } else if (value == "mauve") {
     theme = DisplayTheme::kMauve;
   } else {
@@ -1474,7 +1478,7 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <button class="primary" id="settings-save" type="submit">Save sensor settings</button>
 </form>
 <form id="display-settings-form">
-<div class="field"><label for="device-theme">Device colour theme</label><select id="device-theme"><option value="default">Default</option><option value="midnight-blue">Midnight blue</option><option value="black-red">Black / red</option><option value="slate-green">Slate green</option><option value="violet-dusk">Violet dusk</option><option value="mauve">Mauve</option></select><div class="help">Changes the colour of the physical screen on the device itself.</div></div>
+<div class="field"><label for="device-theme">Device colour theme</label><select id="device-theme"><option value="navy">Navy</option><option value="midnight-blue">Midnight Blue</option><option value="slate-green">Slate Green</option><option value="violet-dusk">Violet Dusk</option><option value="mahogany">Mahogany</option><option value="carbon-red">Carbon Red</option><option value="black-red">Black Red</option><option value="mauve">Mauve</option></select><div class="help">Changes the colour of the physical screen on the device itself.</div></div>
 <div class="field"><label for="color-order">Screen colour order</label><select id="color-order"><option value="bgr">BGR</option><option value="rgb">RGB</option></select><div class="help">If red and blue appear swapped on screen, switch this to match your panel's wiring.</div></div>
 <div class="field"><label for="brightness">Screen brightness (<span id="brightness-value">100</span>%)</label><input id="brightness" type="range" min="10" max="100" step="5"><div class="help">Adjusts the physical screen's backlight brightness.</div></div>
 <div class="field field-row"><div><label for="rotate90">Rotate display 90&deg;</label><div class="help">Enable this if the screen shows portrait and cropped on first start.</div></div><input id="rotate90" type="checkbox"></div>
@@ -2115,7 +2119,7 @@ void handleWebDisplaySettingsPost() {
   const String rotate90_value = web_server.arg("rotate90");
   const String brightness_value = web_server.arg("brightness");
   const String theme_value = web_server.arg("theme");
-  DisplayTheme theme = DisplayTheme::kDefault;
+  DisplayTheme theme = DisplayTheme::kNavy;
   if (color_order != "rgb" && color_order != "bgr") {
     sendWebMessage(400, false, "Color order must be 'rgb' or 'bgr'.");
     return;
@@ -3372,7 +3376,7 @@ void setup() {
   const uint8_t saved_theme = preferences.getUChar("device_theme", 0);
   applyDisplayTheme(saved_theme < static_cast<uint8_t>(DisplayTheme::kCount)
                         ? static_cast<DisplayTheme>(saved_theme)
-                        : DisplayTheme::kDefault);
+                        : DisplayTheme::kNavy);
   loadHistory();
   display.startWrite();
   drawStaticDashboard();
