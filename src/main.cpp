@@ -783,10 +783,11 @@ uint32_t kPanel = kDisplayPalettes[0].panel;
 uint32_t kPanelLight = kDisplayPalettes[0].panel_light;
 uint32_t kWhite = kDisplayPalettes[0].white;
 uint32_t kMuted = kDisplayPalettes[0].muted;
-constexpr uint32_t kGreen = 0x42D392;
-constexpr uint32_t kAmber = 0xFFB547;
-constexpr uint32_t kRed = 0xFF5D73;
+constexpr uint32_t kGreen = 0x7CFC00;
+constexpr uint32_t kAmber = 0xFFBF00;
+constexpr uint32_t kRed = 0xFF0000;
 constexpr uint32_t kBlue = 0x50B8FF;
+constexpr uint32_t kCyan = 0x00FFFF;
 
 DisplayTheme display_theme = DisplayTheme::kNavy;
 
@@ -1120,6 +1121,18 @@ uint32_t qualityColor(uint16_t co2) {
   return kRed;
 }
 
+uint32_t temperatureColor(float celsius) {
+  if (celsius < 18.0f) return kCyan;
+  if (celsius < 24.0f) return kAmber;
+  return kRed;
+}
+
+uint32_t humidityColor(float percent) {
+  if (percent < 40.0f) return kCyan;
+  if (percent < 60.0f) return kAmber;
+  return kRed;
+}
+
 const char* qualityLabel(uint16_t co2) {
   if (co2 < 800) return "FRESH";
   if (co2 < 1200) return "VENTILATE SOON";
@@ -1170,9 +1183,9 @@ uint32_t metricColor(DisplayMetric metric, float value) {
     case DisplayMetric::kCo2:
       return qualityColor(static_cast<uint16_t>(value));
     case DisplayMetric::kTemperature:
-      return kAmber;
+      return temperatureColor(value);
     case DisplayMetric::kHumidity:
-      return kBlue;
+      return humidityColor(value);
     default:
       return kWhite;
   }

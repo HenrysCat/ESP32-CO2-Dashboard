@@ -7,15 +7,23 @@ Full-colour indoor air-quality display for the **ESP32-2432S028R**
 
 ## Display
 
-- Large, colour-coded CO2 reading
+- Large, colour-coded CO2, temperature, and humidity readings
 - Touch-selectable CO2 graph: 10 minutes, 1 hour, 6 hours, or 12 hours
 - Swipe-selectable SD history graph: 24 hours, 7 days, or 30 days
 - Smaller temperature and humidity cards
-- Green: below 800 ppm
-- Amber: 800-1199 ppm
-- Red: 1200 ppm and above
 - The date/time in the top-right corner is joined by the device's Wi-Fi IP
   address whenever it's connected, and left blank otherwise
+
+### Reading colours
+
+Each reading is colour-coded against its own thresholds:
+
+| | CO2 | Temperature | Humidity |
+| --- | --- | --- | --- |
+| Green | below 800 ppm | - | - |
+| Cyan | - | below 18°C | below 40% |
+| Amber | 800-1199 ppm | 18-23.9°C | 40-59.9% |
+| Red | 1200 ppm and above | 24°C and above | 60% and above |
 
 The display is configured for the ESP32-2432S028R's built-in 2.8-inch
 320x240 ILI9341 panel and XPT2046 touch controller. No separate display or
