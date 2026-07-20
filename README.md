@@ -3,6 +3,9 @@
 Full-colour indoor air-quality display for the **ESP32-2432S028R**
 ("Cheap Yellow Display") and a **Sensirion SCD40, SCD41, or SCD30** sensor.
 
+No PlatformIO or build step required - flash it straight from your browser:
+**[Web flasher](https://henryscat.github.io/)**
+
 <img width="1600" height="1028" alt="Photo" src="https://github.com/HenrysCat/ESP32-CO2-Dashboard/blob/main/Web%20UI%20Screenshots/co2-dashboard.jpg" />
 
 ## Display
@@ -22,8 +25,8 @@ Each reading is colour-coded against its own thresholds:
 | --- | --- | --- | --- |
 | Green | below 800 ppm | - | - |
 | Cyan | - | below 18°C | below 40% |
-| Amber | 800-1199 ppm | 18-23.9°C | 40-59.9% |
-| Red | 1200 ppm and above | 24°C and above | 60% and above |
+| Amber | 800-1199 ppm | 18-24.9°C | 40-59.9% |
+| Red | 1200 ppm and above | 25°C and above | 60% and above |
 
 The display is configured for the ESP32-2432S028R's built-in 2.8-inch
 320x240 ILI9341 panel and XPT2046 touch controller. No separate display or
@@ -219,8 +222,16 @@ The same settings panel also has a display section:
   Violet dusk. This only restyles this web page and is saved per browser, so
   different visitors can each pick their own without affecting anyone else.
 - **Device colour theme** - Navy, Midnight Blue, Slate Green, Violet Dusk,
-  Mahogany, Carbon Red, Black Red, or Mauve. Restyles the physical CYD
-  screen and is saved on the device.
+  Mahogany, Carbon Red, Black Red, Mauve, or Custom. Restyles the physical
+  CYD screen and is saved on the device.
+- **Custom theme colours** - shown only when Custom is selected. Five
+  6-digit hex fields (no `#`) let you set the screen's background, panel
+  fill, panel border/graph gridlines, primary text, and muted/label text
+  independently. The fields default-fill with whichever theme is currently
+  active, so switching to Custom starts from a real theme instead of blank
+  values, and switching to a preset and back re-fills them from that preset
+  rather than keeping a stale edit. CO2/temperature/humidity threshold
+  colours (green/amber/red/cyan) are fixed and not affected by any theme.
 - **Screen colour order** (BGR/RGB) - corrects red and blue appearing swapped
   on differently-wired panels.
 - **Rotate display 90 degrees** - corrects panels that boot into a cropped

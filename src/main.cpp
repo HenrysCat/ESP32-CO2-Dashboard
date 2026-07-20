@@ -739,6 +739,7 @@ enum class DisplayTheme : uint8_t {
   kCarbonRed,
   kBlackRed,
   kMauve,
+  kCustom,
   kCount,
 };
 
@@ -764,6 +765,8 @@ struct DisplayPalette {
 // under RGB order, so its R and B bytes are intentionally pre-swapped to
 // land on the intended green - don't "simplify" that one row without
 // re-checking on the device.
+// kCustom is deliberately not in here - it's a runtime palette (below),
+// editable from the web UI, rather than one of these fixed presets.
 constexpr DisplayPalette kDisplayPalettes[] = {
     {0x07111F, 0x0E2034, 0x15304B, 0xF4F7FB, 0x7794AC},  // Navy
     {0x000000, 0x000030, 0x000068, 0xE6ECF7, 0x6078AD},  // Midnight Blue
@@ -783,17 +786,45 @@ uint32_t kPanel = kDisplayPalettes[0].panel;
 uint32_t kPanelLight = kDisplayPalettes[0].panel_light;
 uint32_t kWhite = kDisplayPalettes[0].white;
 uint32_t kMuted = kDisplayPalettes[0].muted;
-constexpr uint32_t kGreen = 0x7CFC00;
+constexpr uint32_t kGreen = 0x4CD100;
 constexpr uint32_t kAmber = 0xFFBF00;
 constexpr uint32_t kRed = 0xFF0000;
 constexpr uint32_t kBlue = 0x50B8FF;
-constexpr uint32_t kCyan = 0x00FFFF;
+constexpr uint32_t kCyan = 0x00BFFF;
 
 DisplayTheme display_theme = DisplayTheme::kNavy;
 
+// Holds the user's custom palette while display_theme == kCustom. Defaults
+// to Navy's colours until loadCustomPalette() restores a saved one (or the
+// web UI overwrites it) so a first-time switch to Custom isn't blank/black.
+DisplayPalette custom_palette = kDisplayPalettes[0];
+
+void loadCustomPalette() {
+  custom_palette.background =
+      preferences.getUInt("custom_bg", kDisplayPalettes[0].background);
+  custom_palette.panel =
+      preferences.getUInt("custom_panel", kDisplayPalettes[0].panel);
+  custom_palette.panel_light =
+      preferences.getUInt("custom_panel_l", kDisplayPalettes[0].panel_light);
+  custom_palette.white =
+      preferences.getUInt("custom_white", kDisplayPalettes[0].white);
+  custom_palette.muted =
+      preferences.getUInt("custom_muted", kDisplayPalettes[0].muted);
+}
+
+void saveCustomPalette() {
+  preferences.putUInt("custom_bg", custom_palette.background);
+  preferences.putUInt("custom_panel", custom_palette.panel);
+  preferences.putUInt("custom_panel_l", custom_palette.panel_light);
+  preferences.putUInt("custom_white", custom_palette.white);
+  preferences.putUInt("custom_muted", custom_palette.muted);
+}
+
 void applyDisplayTheme(DisplayTheme theme) {
   const DisplayPalette& palette =
-      kDisplayPalettes[static_cast<uint8_t>(theme)];
+      theme == DisplayTheme::kCustom
+          ? custom_palette
+          : kDisplayPalettes[static_cast<uint8_t>(theme)];
   display_theme = theme;
   kBackground = palette.background;
   kPanel = palette.panel;
@@ -818,6 +849,8 @@ const char* displayThemeToString(DisplayTheme theme) {
       return "black-red";
     case DisplayTheme::kMauve:
       return "mauve";
+    case DisplayTheme::kCustom:
+      return "custom";
     default:
       return "navy";
   }
@@ -840,10 +873,33 @@ bool displayThemeFromString(const String& value, DisplayTheme& theme) {
     theme = DisplayTheme::kBlackRed;
   } else if (value == "mauve") {
     theme = DisplayTheme::kMauve;
+  } else if (value == "custom") {
+    theme = DisplayTheme::kCustom;
   } else {
     return false;
   }
   return true;
+}
+
+// Validates a 6-digit hex colour string (no '#') from a web form field.
+bool parseHexColor(const String& value, uint32_t& out) {
+  if (value.length() != 6) return false;
+  for (size_t i = 0; i < 6; ++i) {
+    const char c = value[i];
+    const bool is_hex_digit = (c >= '0' && c <= '9') ||
+                              (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    if (!is_hex_digit) return false;
+  }
+  out = strtoul(value.c_str(), nullptr, 16);
+  return true;
+}
+
+void addJsonHexColor(String& json, uint32_t color) {
+  char hex[8];
+  snprintf(hex, sizeof(hex), "%06X", static_cast<unsigned>(color & 0xFFFFFF));
+  json += '"';
+  json += hex;
+  json += '"';
 }
 
 void configureNetworkTime() {
@@ -1123,7 +1179,7 @@ uint32_t qualityColor(uint16_t co2) {
 
 uint32_t temperatureColor(float celsius) {
   if (celsius < 18.0f) return kCyan;
-  if (celsius < 24.0f) return kAmber;
+  if (celsius < 25.0f) return kAmber;
   return kRed;
 }
 
@@ -1438,7 +1494,7 @@ canvas{width:100%;height:100%;display:block}
 .field-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
 label{color:var(--text);font-weight:650}
 .help{color:var(--muted);font-size:.82rem}
-input[type=number],select{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--text);padding:11px 12px;font:inherit}
+input[type=number],input[type=text],select{width:100%;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--text);padding:11px 12px;font:inherit}
 input[type=checkbox]{width:42px;height:22px;accent-color:var(--green)}
 input[type=range]{width:100%;accent-color:var(--green)}
 .primary{width:100%;border-color:var(--accent);color:var(--accent);padding:11px 16px;border-radius:10px;font-weight:700}
@@ -1491,7 +1547,14 @@ footer{color:var(--muted);font-size:.78rem;margin-top:16px;text-align:right}
 <button class="primary" id="settings-save" type="submit">Save sensor settings</button>
 </form>
 <form id="display-settings-form">
-<div class="field"><label for="device-theme">Device colour theme</label><select id="device-theme"><option value="navy">Navy</option><option value="midnight-blue">Midnight Blue</option><option value="slate-green">Slate Green</option><option value="violet-dusk">Violet Dusk</option><option value="mahogany">Mahogany</option><option value="carbon-red">Carbon Red</option><option value="black-red">Black Red</option><option value="mauve">Mauve</option></select><div class="help">Changes the colour of the physical screen on the device itself.</div></div>
+<div class="field"><label for="device-theme">Device colour theme</label><select id="device-theme"><option value="navy">Navy</option><option value="midnight-blue">Midnight Blue</option><option value="slate-green">Slate Green</option><option value="violet-dusk">Violet Dusk</option><option value="mahogany">Mahogany</option><option value="carbon-red">Carbon Red</option><option value="black-red">Black Red</option><option value="mauve">Mauve</option><option value="custom">Custom</option></select><div class="help">Changes the colour of the physical screen on the device itself.</div></div>
+<div id="custom-palette-fields" style="display:none">
+<div class="field"><label for="custom-background">Background hex</label><input id="custom-background" type="text" maxlength="6" pattern="[0-9A-Fa-f]{6}" spellcheck="false"><div class="help">Screen background shown behind and around every panel.</div></div>
+<div class="field"><label for="custom-panel">Panel hex</label><input id="custom-panel" type="text" maxlength="6" pattern="[0-9A-Fa-f]{6}" spellcheck="false"><div class="help">Fill colour of each panel box.</div></div>
+<div class="field"><label for="custom-panel-light">Panel border hex</label><input id="custom-panel-light" type="text" maxlength="6" pattern="[0-9A-Fa-f]{6}" spellcheck="false"><div class="help">Panel borders and the trend graph's gridlines.</div></div>
+<div class="field"><label for="custom-white">Text hex</label><input id="custom-white" type="text" maxlength="6" pattern="[0-9A-Fa-f]{6}" spellcheck="false"><div class="help">Primary text colour, used for titles and headings.</div></div>
+<div class="field"><label for="custom-muted">Muted text hex</label><input id="custom-muted" type="text" maxlength="6" pattern="[0-9A-Fa-f]{6}" spellcheck="false"><div class="help">Secondary muted text, used for labels and captions.</div></div>
+</div>
 <div class="field"><label for="color-order">Screen colour order</label><select id="color-order"><option value="bgr">BGR</option><option value="rgb">RGB</option></select><div class="help">If red and blue appear swapped on screen, switch this to match your panel's wiring.</div></div>
 <div class="field"><label for="brightness">Screen brightness (<span id="brightness-value">100</span>%)</label><input id="brightness" type="range" min="10" max="100" step="5"><div class="help">Adjusts the physical screen's backlight brightness.</div></div>
 <div class="field field-row"><div><label for="rotate90">Rotate display 90&deg;</label><div class="help">Enable this if the screen shows portrait and cropped on first start.</div></div><input id="rotate90" type="checkbox"></div>
@@ -1519,6 +1582,7 @@ function applyTheme(theme){
 function loadTheme(){const theme=localStorage.getItem(THEME_STORAGE_KEY)||"midnight";$("theme").value=theme;applyTheme(theme)}
 const metricInfo={co2:{label:"Carbon dioxide",trend:"CO2 trend",unit:"PPM",accent:colors.green,digits:0},temperature:{label:"Temperature",trend:"Temperature trend",unit:"\u00b0C",accent:colors.amber,digits:1},humidity:{label:"Humidity",trend:"Humidity trend",unit:"%",accent:colors.blue,digits:1}};
 let liveStatus=null,liveMetric="co2",range=10,trend={values:[]};
+let presetPalettes={};
 let monthly=null,monthlyMetric="co2";
 function quality(ppm){return ppm<800?["FRESH",colors.green]:ppm<1200?["VENTILATE SOON",colors.amber]:["VENTILATE NOW",colors.red]}
 async function getJson(url){const response=await fetch(url,{cache:"no-store"}),data=await response.json();if(!response.ok)throw Error(data.message||`Request failed (${response.status})`);return data}
@@ -1569,11 +1633,17 @@ async function openSettings(){
  $("settings").classList.add("open");$("settings-message").textContent="Reading sensor settings...";
  try{const d=await getJson("/api/settings");$("asc").checked=d.asc;$("offset").value=d.temperature_offset.toFixed(1);$("reference").value=String(d.reference);$("settings-message").textContent=d.sensor_ready?"":"Sensor is not ready."}
  catch(e){$("settings-message").textContent="Could not read sensor settings."}
- try{const d=await getJson("/api/display-settings");$("color-order").value=d.color_order;$("rotate90").checked=d.rotate90;$("flip180").checked=d.flip180;$("brightness").value=d.brightness;$("brightness-value").textContent=d.brightness;$("device-theme").value=d.theme}
+ try{const d=await getJson("/api/display-settings");presetPalettes=d.presets||{};$("color-order").value=d.color_order;$("rotate90").checked=d.rotate90;$("flip180").checked=d.flip180;$("brightness").value=d.brightness;$("brightness-value").textContent=d.brightness;$("device-theme").value=d.theme;$("custom-background").value=d.palette.background;$("custom-panel").value=d.palette.panel;$("custom-panel-light").value=d.palette.panel_light;$("custom-white").value=d.palette.white;$("custom-muted").value=d.palette.muted;syncCustomPaletteVisibility()}
  catch(e){}
  await getSensorType();
 }
 function closeSettings(){$("settings").classList.remove("open")}
+function syncCustomPaletteVisibility(){
+ const value=$("device-theme").value,isCustom=value==="custom";
+ $("custom-palette-fields").style.display=isCustom?"block":"none";
+ const preset=presetPalettes[value];
+ if(!isCustom&&preset){$("custom-background").value=preset.background;$("custom-panel").value=preset.panel;$("custom-panel-light").value=preset.panel_light;$("custom-white").value=preset.white;$("custom-muted").value=preset.muted}
+}
 function draw(){
  const canvas=$("chart"),rect=canvas.getBoundingClientRect(),scale=devicePixelRatio||1;canvas.width=Math.round(rect.width*scale);canvas.height=Math.round(rect.height*scale);
  const c=canvas.getContext("2d");c.scale(scale,scale);const w=rect.width,h=rect.height,p={l:48,r:10,t:12,b:25},gw=w-p.l-p.r,gh=h-p.t-p.b,values=trend.values||[],present=values.filter(v=>v!==null),info=metricInfo[liveMetric];
@@ -1602,7 +1672,8 @@ document.querySelectorAll("button[data-month-metric]").forEach(b=>b.addEventList
 $("settings-open").addEventListener("click",openSettings);$("settings-close").addEventListener("click",closeSettings);$("settings").addEventListener("click",e=>{if(e.target===$("settings"))closeSettings()});
 $("settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("settings-save");button.disabled=true;$("settings-message").textContent="Saving settings...";try{const d=await postSettings({action:"save",asc:$("asc").checked?"1":"0",offset:$("offset").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("brightness").addEventListener("input",()=>{$("brightness-value").textContent=$("brightness").value});
-$("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value,rotate90:$("rotate90").checked?"1":"0",flip180:$("flip180").checked?"1":"0",brightness:$("brightness").value,theme:$("device-theme").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
+$("device-theme").addEventListener("change",syncCustomPaletteVisibility);
+$("display-settings-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("display-settings-save");button.disabled=true;$("settings-message").textContent="Saving display setting...";try{const d=await postDisplaySettings({color_order:$("color-order").value,rotate90:$("rotate90").checked?"1":"0",flip180:$("flip180").checked?"1":"0",brightness:$("brightness").value,theme:$("device-theme").value,custom_background:$("custom-background").value,custom_panel:$("custom-panel").value,custom_panel_light:$("custom-panel-light").value,custom_white:$("custom-white").value,custom_muted:$("custom-muted").value});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("sensor-type-form").addEventListener("submit",async e=>{e.preventDefault();const button=$("sensor-type-save");button.disabled=true;$("settings-message").textContent="Saving sensor type...";try{const d=await postSensorType({sensor_type:$("sensor-type").value});$("settings-message").textContent=d.message;await getSensorType()}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 $("frc").addEventListener("click",async()=>{const reference=$("reference").value;if(!confirm(`Run forced recalibration at ${reference} ppm? The sensor must have been in stable reference air for at least three minutes.`))return;const button=$("frc");button.disabled=true;$("settings-message").textContent="Recalibrating sensor...";try{const d=await postSettings({action:"frc",reference});$("settings-message").textContent=d.message}catch(error){$("settings-message").textContent=error.message}finally{button.disabled=false}});
 addEventListener("keydown",e=>{if(e.key==="Escape")closeSettings()});
@@ -2106,9 +2177,23 @@ void handleWebSettingsPost() {
   sendWebMessage(400, false, "Unknown settings action.");
 }
 
+void addJsonPalette(String& json, const DisplayPalette& palette) {
+  json += F("{\"background\":");
+  addJsonHexColor(json, palette.background);
+  json += F(",\"panel\":");
+  addJsonHexColor(json, palette.panel);
+  json += F(",\"panel_light\":");
+  addJsonHexColor(json, palette.panel_light);
+  json += F(",\"white\":");
+  addJsonHexColor(json, palette.white);
+  json += F(",\"muted\":");
+  addJsonHexColor(json, palette.muted);
+  json += F("}");
+}
+
 void handleWebDisplaySettingsGet() {
   String json;
-  json.reserve(160);
+  json.reserve(1400);
   json = F("{\"color_order\":\"");
   json += display.colorOrderRgb() ? F("rgb") : F("bgr");
   json += F("\",\"flip180\":");
@@ -2119,7 +2204,25 @@ void handleWebDisplaySettingsGet() {
   json += String(backlight_brightness);
   json += F(",\"theme\":\"");
   json += displayThemeToString(display_theme);
-  json += F("\"}");
+  // Reflects whatever palette is currently active (a preset or kCustom) so
+  // the web UI can pre-fill the custom colour fields with a sensible
+  // starting point - the theme in use, not necessarily the saved custom one.
+  json += F("\",\"palette\":");
+  DisplayPalette active_palette{kBackground, kPanel, kPanelLight, kWhite,
+                                kMuted};
+  addJsonPalette(json, active_palette);
+  // Every preset's hex codes, so the web UI can re-fill the custom colour
+  // fields whenever the theme dropdown is switched back to Custom after
+  // browsing a preset, instead of leaving a stale earlier edit in place.
+  json += F(",\"presets\":{");
+  for (uint8_t i = 0; i < static_cast<uint8_t>(DisplayTheme::kCustom); ++i) {
+    if (i > 0) json += ',';
+    json += '"';
+    json += displayThemeToString(static_cast<DisplayTheme>(i));
+    json += F("\":");
+    addJsonPalette(json, kDisplayPalettes[i]);
+  }
+  json += F("}}");
   web_server.sendHeader(F("Cache-Control"), F("no-store"));
   web_server.send(200, F("application/json"), json);
 }
@@ -2152,10 +2255,27 @@ void handleWebDisplaySettingsPost() {
     return;
   }
 
+  DisplayPalette custom = custom_palette;
+  if (theme == DisplayTheme::kCustom &&
+      (!parseHexColor(web_server.arg("custom_background"), custom.background) ||
+       !parseHexColor(web_server.arg("custom_panel"), custom.panel) ||
+       !parseHexColor(web_server.arg("custom_panel_light"),
+                      custom.panel_light) ||
+       !parseHexColor(web_server.arg("custom_white"), custom.white) ||
+       !parseHexColor(web_server.arg("custom_muted"), custom.muted))) {
+    sendWebMessage(400, false,
+                  "Custom colours must be 6-digit hex codes (no '#').");
+    return;
+  }
+
   const bool rgb_order = color_order == "rgb";
   const bool flip180 = flip180_value == "1";
   const bool rotate90 = rotate90_value == "1";
   display.applyDisplaySettings(rgb_order, flip180, rotate90);
+  if (theme == DisplayTheme::kCustom) {
+    custom_palette = custom;
+    saveCustomPalette();
+  }
   applyDisplayTheme(theme);
   applyBacklightBrightness(static_cast<uint8_t>(brightness));
   preferences.putUChar("color_order", rgb_order ? 1 : 0);
@@ -2877,7 +2997,7 @@ void drawMetricValue(int x, const char* value, const char* unit,
   if (!beginRegion(x + 18, 196, 122, 28, kPanel)) return;
   region_sprite.setTextDatum(textdatum_t::top_left);
   region_sprite.setFont(&fonts::Font4);
-  region_sprite.setTextColor(kWhite);
+  region_sprite.setTextColor(accent);
   region_sprite.drawString(value, 3, 1);
   const int value_width = region_sprite.textWidth(value);
   region_sprite.setFont(&fonts::Font2);
@@ -3386,6 +3506,7 @@ void setup() {
   if (saved_sensor_type <= static_cast<uint8_t>(SensorType::kScd30)) {
     configured_sensor_type = static_cast<SensorType>(saved_sensor_type);
   }
+  loadCustomPalette();
   const uint8_t saved_theme = preferences.getUChar("device_theme", 0);
   applyDisplayTheme(saved_theme < static_cast<uint8_t>(DisplayTheme::kCount)
                         ? static_cast<DisplayTheme>(saved_theme)
