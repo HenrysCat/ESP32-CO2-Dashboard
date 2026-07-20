@@ -3,7 +3,7 @@
 Full-colour indoor air-quality display for the **ESP32-2432S028R**
 ("Cheap Yellow Display") and a **Sensirion SCD40, SCD41, or SCD30** sensor.
 
-<img width="1600" height="1028" alt="Photo" src="https://github.com/HenrysCat/ESP32-CO2-Dashboard/blob/main/Web%20UI%20Screenshots/CO2.jpg" />
+<img width="1600" height="1028" alt="Photo" src="https://github.com/HenrysCat/ESP32-CO2-Dashboard/blob/main/Web%20UI%20Screenshots/co2-dashboard.jpg" />
 
 ## Display
 
